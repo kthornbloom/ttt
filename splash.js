@@ -163,7 +163,7 @@ async function runLogoAnimation() {
       // Play theme when first word lands (55% through animation)
       if (i === 0) {
         setTimeout(() => {
-          const snd = new Audio(asset('/assets/audio/teenytinytanks.mp3'));
+          const snd = new Audio(asset('/assets/audio/speech/teenytinytanks.mp3'));
           snd.play().catch(() => {});
         }, DROP_DURATION * 0.55);
       }

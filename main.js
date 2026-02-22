@@ -230,9 +230,10 @@ let engineBuffer = null;
 let engineGain = null;
 let hissBuffer = null;
 let laserBuffer = null;
+let minigunBuffer = null;
 let shootBuffer = null;
 let reloadBuffer = null;
-let laserSource = null;
+let heatBeamSource = null;
 let explodeBuffer = null;
 let repairBuffer = null;
 let thudBuffer = null;
@@ -268,9 +269,10 @@ async function loadEngineSound() {
 }
 
 async function loadWeaponSounds() {
-  [hissBuffer, laserBuffer, shootBuffer, reloadBuffer] = await Promise.all([
+  [hissBuffer, laserBuffer, minigunBuffer, shootBuffer, reloadBuffer] = await Promise.all([
     loadAudio(asset('/assets/audio/hiss.mp3')),
     loadAudio(asset('/assets/audio/laser.mp3')),
+    loadAudio(asset('/assets/audio/minigun.mp3')),
     loadAudio(asset('/assets/audio/shot.wav')),
     loadAudio(asset('/assets/audio/reload.mp3'))
   ]);
@@ -303,19 +305,20 @@ function playRandomFrom(buffers) {
   if (valid.length) playOnce(valid[Math.floor(Math.random() * valid.length)]);
 }
 
-function startLaserSound() {
-  if (!laserBuffer || laserSource) return;
-  laserSource = audioCtx.createBufferSource();
-  laserSource.buffer = laserBuffer;
-  laserSource.loop = true;
-  laserSource.connect(audioCtx.destination);
-  laserSource.start(0);
+function startHeatBeamSound(isMinigun) {
+  const buf = isMinigun ? minigunBuffer : laserBuffer;
+  if (!buf || heatBeamSource) return;
+  heatBeamSource = audioCtx.createBufferSource();
+  heatBeamSource.buffer = buf;
+  heatBeamSource.loop = true;
+  heatBeamSource.connect(audioCtx.destination);
+  heatBeamSource.start(0);
 }
 
-function stopLaserSound() {
-  if (laserSource) {
-    laserSource.stop();
-    laserSource = null;
+function stopHeatBeamSound() {
+  if (heatBeamSource) {
+    heatBeamSource.stop();
+    heatBeamSource = null;
   }
 }
 
@@ -1474,8 +1477,17 @@ function animate() {
       playOnce(hissBuffer);
     }
     if (mgHeat < beamHeatMax) {
-      startLaserSound();
-      muzzleLight.intensity = 12;
+      startHeatBeamSound(isMinigun);
+      const strobe = isMinigun ? (0.5 + 0.5 * Math.sin(now * 40)) : 1;
+      const baseIntensity = isMinigun ? 14 : 12;
+      muzzleLight.intensity = baseIntensity * (isMinigun ? Math.max(0.3, strobe) : 1);
+      if (isMinigun) {
+        muzzleLight.color.setHex(0xffff00);
+        laserHitLight.color.setHex(0xffff00);
+      } else {
+        muzzleLight.color.setHex(0xffaa66);
+        laserHitLight.color.setHex(0xff2222);
+      }
       const fd = fireForward.clone().normalize();
       const ray = new RAPIER.Ray(
         { x: barrelTip.x, y: barrelTip.y, z: barrelTip.z },
@@ -1484,7 +1496,7 @@ function animate() {
       const hit = world.castRayAndGetNormal(ray, beamRange, true, null, null, null, tankRigidBody);
       const end = hit ? Math.max(0.05, Math.min(beamRange, hit.toi)) : beamRange;
       laserHitLight.position.set(barrelTip.x + fd.x * end, barrelTip.y + fd.y * end, barrelTip.z + fd.z * end);
-      laserHitLight.intensity = 8;
+      laserHitLight.intensity = isMinigun ? 10 * Math.max(0.3, strobe) : 8;
       const hitParent = hit?.collider?.parent?.();
       if (hitParent === enemyRigidBody && !enemyDead && (now - lastLaserDamageTime) >= beamDamageInterval) {
         lastLaserDamageTime = now;
@@ -1516,16 +1528,19 @@ function animate() {
       const posArr = [];
       const colArr = [];
       const t = Date.now() * 0.02;
+      const animT = performance.now() * 0.015;
       for (let i = 0; i < mgSegments; i++) {
         const f = i / (mgSegments - 1);
         posArr.push(barrelTip.x + fd.x * end * f, barrelTip.y + fd.y * end * f, barrelTip.z + fd.z * end * f);
         const bright = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(t + (1 - f) * 8));
         if (isMinigun) {
-          colArr.push(bright, bright, bright);
+          const stripe = 0.5 + 0.5 * Math.sin(f * 18 + animT);
+          colArr.push(stripe, stripe, stripe);
         } else {
           colArr.push(bright, bright * 0.4, 0);
         }
       }
+      if (mgLine.material.color) mgLine.material.color.setHex(isMinigun ? 0xffffff : 0xff8800);
       mgLine.geometry.setPositions(posArr);
       mgLine.geometry.setColors(colArr);
       mgLine.material.resolution.set(innerWidth, innerHeight);
@@ -1534,9 +1549,11 @@ function animate() {
       mgLine.visible = false;
     }
   } else {
-    stopLaserSound();
+    stopHeatBeamSound();
     mgLine.visible = false;
     if (laserHitLight) laserHitLight.intensity = 0;
+    muzzleLight.color.setHex(0xffaa66);
+    laserHitLight.color.setHex(0xff2222);
     laserHoleCooldown = 0;
     const coolRate = mgOverheated ? mgCoolRateOverheated : beamCoolRate;
     mgHeat = Math.max(0, mgHeat - coolRate * dt);
@@ -1547,7 +1564,7 @@ function animate() {
   const weaponName = currentWeapon?.name ?? (weaponMode === 1 ? 'Cannon' : 'Laser');
   const cannonCooldownStr = cannonCooldown > 0 ? ` | Cooldown: ${cannonCooldown.toFixed(1)}s` : '';
   const weapon2CooldownStr = weapon2Cooldown > 0 && weaponMode === 2 ? ` | Cooldown: ${weapon2Cooldown.toFixed(1)}s` : '';
-  const heatStr = (heatBeamW && isHeatBeamWeapon(heatBeamW)) ? ` | Heat: ${(mgHeat * 100).toFixed(0)}%` : '';
+  const heatStr = (heatBeamW && isHeatBeamWeapon(heatBeamW)) ? ` | Heat: ${(Math.min(1, mgHeat / (heatBeamW?.heatMax ?? 1)) * 100).toFixed(0)}%` : '';
   const healthStr = ` | HP: ${playerHealth}/${playerHealthMaxDynamic}`;
   const enemyHealthStr = enemyRigidBody || enemyDead ? ` | Enemy: ${enemyHealth}/${enemyHealthMax}` : '';
   hudEl.textContent = `Weapon: ${weaponName} | Ammo: ${cannonAmmo}/${cannonAmmoMax}${cannonCooldownStr}${weapon2CooldownStr}${heatStr}${healthStr}${enemyHealthStr}`;
