@@ -102,12 +102,15 @@ async function updateTankDisplay() {
   const char = characters[tankIndex];
   if (!char) return;
   document.getElementById('tank-name').textContent = char.name;
-  const weaponsStr = char.weapons?.map((w) => w.name).join(', ') ?? 'Cannon';
+  const weaponsStr = (char.weapons?.length
+    ? char.weapons.map((w) => `<div class="weapon-display">${w.name}</div>`).join('')
+    : `<div class="weapon-display">Cannon</div>`);
   document.getElementById('tank-stats').innerHTML = `
-    ${statBar(char.health, 150, 'HP')}
-    ${statBar(char.speed, 20, 'Spd')}
-    ${statBar(char.acceleration, 1.5, 'Acc')}
-    <div class="tank-stat-row"><span class="tank-stat-label">Weapons</span><span>${weaponsStr}</span></div>
+    ${statBar(char.health, 150, 'HEALTH')}
+    ${statBar(char.speed, 20, 'SPEED')}
+    ${statBar(char.acceleration, 1.5, 'ACCEL')}
+    ${statBar(char.firepower ?? 5, 10, 'FIREPWR')}
+    <div class="weapons-row">${weaponsStr}</div>
     ${!char.isUnlocked ? '<span style="color:#ff6b6b;">Locked</span>' : ''}
   `;
   const btn = document.getElementById('tank-select-continue');

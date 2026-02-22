@@ -7,12 +7,32 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 const asset = (path) => import.meta.env.BASE_URL + path.replace(/^\//, '');
 
 let scene, camera, renderer, tankMesh = null;
-let shadowMesh = null;
+let groundPlane = null;
 let animationId = null;
+let dropAnimationProgress = 1;
+let dropImpactPlayed = false;
+
+const DROP_START_Y = 4;
+const DROP_END_Y = 0;
+const DROP_DURATION_MS = 450;
 
 function hexToColor(hex) {
   const c = new THREE.Color(hex);
   return { r: c.r, g: c.g, b: c.b };
+}
+
+function easeOutBounce(t) {
+  const n1 = 7.5625, d1 = 2.75;
+  if (t < 1 / d1) return n1 * t * t;
+  if (t < 2 / d1) return n1 * (t -= 1.5 / d1) * t + 0.75;
+  if (t < 2.5 / d1) return n1 * (t -= 2.25 / d1) * t + 0.9375;
+  return n1 * (t -= 2.625 / d1) * t + 0.984375;
+}
+
+function playClank() {
+  const snd = new Audio(asset('/assets/audio/thud.mp3'));
+  snd.volume = 0.1;
+  snd.play().catch(() => {});
 }
 
 export async function initTankPreview(canvas, character) {
@@ -24,19 +44,45 @@ export async function initTankPreview(canvas, character) {
   camera.position.set(0, 2.5, 11);
   camera.lookAt(0, 1.2, 0);
 
-  const shadowGeo = new THREE.CircleGeometry(1.8, 32);
-  const shadowMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.4 });
-  shadowMesh = new THREE.Mesh(shadowGeo, shadowMat);
-  shadowMesh.rotation.x = -Math.PI / 2;
-  shadowMesh.position.set(0, 0.01, 0);
-  scene.add(shadowMesh);
+  // Ground plane for real shadows (receives shadows only)
+  const groundGeo = new THREE.PlaneGeometry(12, 12);
+  const groundMat = new THREE.ShadowMaterial({ opacity: 0.35 });
+  groundPlane = new THREE.Mesh(groundGeo, groundMat);
+  groundPlane.rotation.x = -Math.PI / 2;
+  groundPlane.position.y = -1;
+  groundPlane.receiveShadow = true;
+  scene.add(groundPlane);
 
-  const light = new THREE.DirectionalLight(0xffffff, 2.5);
-  light.position.set(5, 12, 6);
-  scene.add(light);
-  scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+  // Improved 3-point lighting
+  const keyLight = new THREE.DirectionalLight(0xffffff, 2.2);
+  keyLight.position.set(4, 10, 6);
+  keyLight.castShadow = true;
+  keyLight.shadow.mapSize.width = 1024;
+  keyLight.shadow.mapSize.height = 1024;
+  keyLight.shadow.camera.near = 0.5;
+  keyLight.shadow.camera.far = 30;
+  keyLight.shadow.camera.left = -6;
+  keyLight.shadow.camera.right = 6;
+  keyLight.shadow.camera.top = 6;
+  keyLight.shadow.camera.bottom = -6;
+  keyLight.shadow.bias = -0.0001;
+  keyLight.shadow.normalBias = 0.02;
+  scene.add(keyLight);
+
+  const fillLight = new THREE.DirectionalLight(0xffeedd, 0.8);
+  fillLight.position.set(-5, 5, -4);
+  scene.add(fillLight);
+
+  const rimLight = new THREE.DirectionalLight(0xffffff, 0.6);
+  rimLight.position.set(0, 3, -8);
+  scene.add(rimLight);
+
+  const ambient = new THREE.AmbientLight(0xffddcc, 0.5);
+  scene.add(ambient);
 
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   resize();
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -74,12 +120,18 @@ async function loadTank(character) {
     if (c.isMesh && c.material) {
       c.material = c.material.clone();
       if (c.material.color) c.material.color.multiplyScalar(0.8).lerp(new THREE.Color(color.r, color.g, color.b), 0.5);
+      c.castShadow = true;
+      c.receiveShadow = true;
     }
   });
 
   tankMesh.scale.setScalar(1.4);
-  tankMesh.position.set(0, 0, 0);
+  tankMesh.rotation.y = Math.PI;
+  tankMesh.position.set(0, DROP_START_Y, 0);
   scene.add(tankMesh);
+
+  dropAnimationProgress = 0;
+  dropImpactPlayed = false;
 }
 
 export async function setTankCharacter(character) {
@@ -100,16 +152,36 @@ export function destroyTankPreview() {
       }
     });
   }
-  if (shadowMesh && scene) {
-    scene.remove(shadowMesh);
-    shadowMesh.geometry?.dispose();
-    shadowMesh.material?.dispose();
+  if (groundPlane && scene) {
+    scene.remove(groundPlane);
+    groundPlane.geometry?.dispose();
+    groundPlane.material?.dispose();
   }
-  scene = camera = renderer = tankMesh = shadowMesh = null;
+  scene = camera = renderer = tankMesh = groundPlane = null;
 }
+
+let lastTime = 0;
 
 function animate() {
   animationId = requestAnimationFrame(animate);
-  if (tankMesh) tankMesh.rotation.y += 0.01;
+  const now = performance.now();
+  const dt = lastTime ? (now - lastTime) / 1000 : 0;
+  lastTime = now;
+
+  if (tankMesh) {
+    tankMesh.rotation.y += 0.01;
+
+    if (dropAnimationProgress < 1) {
+      const prevEased = easeOutBounce(dropAnimationProgress);
+      dropAnimationProgress = Math.min(1, dropAnimationProgress + dt / (DROP_DURATION_MS / 1000));
+      const eased = easeOutBounce(dropAnimationProgress);
+      tankMesh.position.y = DROP_START_Y + (DROP_END_Y - DROP_START_Y) * eased;
+      if (!dropImpactPlayed && prevEased < 1 && eased >= 1) {
+        dropImpactPlayed = true;
+        playClank();
+      }
+    }
+  }
+
   if (renderer && scene) renderer.render(scene, camera);
 }
