@@ -58,6 +58,87 @@
 
     #splash-start.hidden { display: none; }
 
+    #tank-select {
+      flex: 1;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+      padding: 1rem 2rem;
+    }
+
+    #tank-select:not(.hidden) { display: flex; }
+    #tank-select.hidden { display: none; }
+
+    .tank-select-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 1.5rem;
+    }
+
+    .tank-arrow {
+      font-size: 2.5rem;
+      background: black;
+      color: white;
+      border: none;
+      width: 48px;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-family: inherit;
+    }
+
+    .tank-arrow:hover { opacity: 0.9; }
+    .tank-arrow:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    #tank-preview-canvas {
+      width: 400px;
+      height: 300px;
+      background: #FF5900;
+    }
+
+    .tank-name {
+      color: white;
+      font-size: 1.75rem;
+      margin: 0;
+    }
+
+    .tank-stats {
+      color: rgba(255,255,255,0.9);
+      font-size: 0.9rem;
+      text-align: center;
+      max-width: 320px;
+    }
+
+    .tank-stat-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      margin: 0.35rem 0;
+    }
+
+    .tank-stat-label { min-width: 4rem; text-align: left; }
+
+    .tank-stat-bar {
+      display: flex;
+      gap: 2px;
+    }
+
+    .tank-stat-notch {
+      width: 14px;
+      height: 12px;
+      background: rgba(0,0,0,0.5);
+    }
+
+    .tank-stat-notch.filled {
+      background: white;
+    }
+
     #level-select {
       flex: 1;
       display: none;
@@ -66,10 +147,25 @@
       gap: 1.5rem;
       padding: 1rem 2rem 2rem;
       overflow-y: auto;
+      position: relative;
     }
 
     #level-select:not(.hidden) { display: flex; }
     #level-select.hidden { display: none; }
+
+    .back-btn {
+      position: absolute;
+      top: 1rem;
+      left: 1rem;
+      font-family: "Jersey 15", sans-serif;
+      font-size: 1.2rem;
+      background: black;
+      color: white;
+      border: none;
+      padding: 0.5rem 1rem;
+      cursor: pointer;
+    }
+    .back-btn:hover { opacity: 0.9; }
 
     #level-select-logo {
       width: 80px;
@@ -157,6 +253,15 @@
       background: rgba(0,0,0,0.5);
       color: white;
     }
+
+    .next-level-btn {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 20;
+    }
+    .next-level-btn.hidden { display: none; }
   </style>
 </head>
 <body>
@@ -203,7 +308,18 @@
     <div id="splash-start" class="ghosted">
       <button id="start-btn">START</button>
     </div>
+    <div id="tank-select" class="hidden">
+      <h2 class="tank-name" id="tank-name">Scout</h2>
+      <div class="tank-select-row">
+        <button class="tank-arrow" id="tank-arrow-left" aria-label="Previous tank">‹</button>
+        <canvas id="tank-preview-canvas"></canvas>
+        <button class="tank-arrow" id="tank-arrow-right" aria-label="Next tank">›</button>
+      </div>
+      <div class="tank-stats" id="tank-stats"></div>
+      <button id="tank-select-continue">Select Level</button>
+    </div>
     <div id="level-select" class="hidden">
+      <button id="level-select-back" class="back-btn">← Back</button>
       <div id="level-select-logo">
         <img src="/assets/images/Logo.svg" alt="Teeny Tiny Tanks">
       </div>

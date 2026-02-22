@@ -1,0 +1,74 @@
+{
+  "levels": [
+    {
+      "id": "level-01",
+      "name": "Level 1",
+      "order": 1,
+      "difficulty": 1,
+      "glbPath": "/assets/levels/level-01.glb"
+    },
+    {
+      "id": "level-02",
+      "name": "Level 2",
+      "order": 2,
+      "difficulty": 1,
+      "glbPath": "/assets/levels/level-02.glb"
+    },
+    {
+      "id": "level-03",
+      "name": "Level 3",
+      "order": 3,
+      "difficulty": 2,
+      "glbPath": "/assets/levels/level-03.glb"
+    },
+    {
+      "id": "level-04",
+      "name": "Level 4",
+      "order": 4,
+      "difficulty": 2,
+      "glbPath": "/assets/levels/level-04.glb"
+    },
+    {
+      "id": "level-05",
+      "name": "Level 5",
+      "order": 5,
+      "difficulty": 3,
+      "glbPath": "/assets/levels/level-05.glb"
+    },
+    {
+      "id": "level-06",
+      "name": "Level 6",
+      "order": 6,
+      "difficulty": 3,
+      "glbPath": "/assets/levels/level-06.glb"
+    },
+    {
+      "id": "level-07",
+      "name": "Level 7",
+      "order": 7,
+      "difficulty": 4,
+      "glbPath": "/assets/levels/level-07.glb"
+    },
+    {
+      "id": "level-08",
+      "name": "Level 8",
+      "order": 8,
+      "difficulty": 4,
+      "glbPath": "/assets/levels/level-08.glb"
+    },
+    {
+      "id": "level-09",
+      "name": "Level 9",
+      "order": 9,
+      "difficulty": 5,
+      "glbPath": "/assets/levels/level-09.glb"
+    },
+    {
+      "id": "level-10",
+      "name": "Level 10",
+      "order": 10,
+      "difficulty": 5,
+      "glbPath": "/assets/levels/level-10.glb"
+    }
+  ]
+}

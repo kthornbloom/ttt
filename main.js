@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { getLevelGlbPath, getNextLevelId, markDefeated } from './levels.js';
+import { getCharacterGlbPath } from './characters.js';
 
 // Resolve asset paths for both local dev (/) and GitHub Pages (/ttt/)
 const asset = (path) => import.meta.env.BASE_URL + path.replace(/^\//, '');
@@ -220,6 +222,11 @@ let lossSpeechBuffers = [];
 let thudCooldown = 0;
 let winSpeechPlayed = false;
 let lossSpeechPlayed = false;
+let currentLevelId = 'level-01';
+let currentTankId = 'tank-01';
+let nextLevelIdForButton = null;
+let nextLevelBtnEl = null;
+let animateLoopStarted = false;
 
 async function loadAudio(url) {
   try {
@@ -460,11 +467,66 @@ function geometryToRapier(geometry, matrix) {
   return { vertices, indices };
 }
 
-async function init() {
+async function init(levelId = 'level-01', tankId = 'tank-01') {
+  currentLevelId = levelId;
+  currentTankId = tankId;
+
+  // Reset game state (for re-init when loading next level)
+  playerDead = false;
+  enemyDead = false;
+  winSpeechPlayed = false;
+  lossSpeechPlayed = false;
+  playerHealth = playerHealthMax;
+  enemyHealth = enemyHealthMax;
+  cannonAmmo = cannonAmmoMax;
+  cannonCooldown = 0;
+  mgHeat = 0;
+  mgOverheated = false;
+  cannonBalls = [];
+  explosionPieces = [];
+  healthPickups = [];
+  bulletHoles.length = 0;
+  currentSpeed = 0;
+  currentTurnSpeed = 0;
+  bodyRoll = 0;
+  bodyPitch = 0;
+  bodyAimPitch = 0;
+  wheelRotL = 0;
+  wheelRotR = 0;
+  barrelRecoil = 0;
+  boostRemaining = boostDuration;
+  boostCooldown = 0;
+  weaponMode = 1;
+  fireCannonPending = false;
+  laserHoleCooldown = 0;
+  thudCooldown = 0;
+  lastLaserDamageTime = 0;
+  enemyCannonCooldown = 0;
+  enemyEngineTime = 0;
+  enemyStuckTimer = 0;
+  enemyLastPos = { x: 0, y: 0, z: 0 };
+  playerKnockbackVel = { x: 0, y: 0, z: 0 };
+  enemyKnockbackVel = { x: 0, y: 0, z: 0 };
+  impactFlashAge = -1;
+  tankRigidBody = null;
+  tankMesh = null;
+  enemyRigidBody = null;
+  enemyMesh = null;
+  Object.keys(keys).forEach((k) => (keys[k] = false));
+  if (nextLevelBtnEl) nextLevelBtnEl.classList.add('hidden');
+
+  // Cleanup previous level and game objects when re-initializing
+  const lights = scene.children.filter((c) => c.isLight);
+  scene.children.slice().forEach((c) => {
+    if (!c.isLight) scene.remove(c);
+  });
+
   world = new RAPIER.World(new RAPIER.Vector3(0, -9.81, 0));
 
   // Load Level
-  const levelGlb = await loader.loadAsync(asset('/assets/levels/level-01.glb'));
+  const levelPath = await getLevelGlbPath(levelId);
+  const levelGlb = await loader.loadAsync(levelPath);
+  nextLevelIdForButton = await getNextLevelId(levelId);
   const level = levelGlb.scene;
   level.updateMatrixWorld(true);
 
@@ -497,8 +559,9 @@ async function init() {
   });
   scene.add(level);
 
-  // Load Tank
-  const tankGlb = await loader.loadAsync(asset('/assets/characters/tank-01.glb'));
+  // Load Tank (player)
+  const playerTankPath = await getCharacterGlbPath(tankId);
+  const tankGlb = await loader.loadAsync(playerTankPath);
   tankMesh = tankGlb.scene;
   bodyGroup = tankMesh.getObjectByName('Body');
   barrelGroup = tankMesh.getObjectByName('Barrel');
@@ -540,7 +603,7 @@ async function init() {
 
   scene.add(tankMesh);
 
-  const enemyGlb = await loader.loadAsync(asset('/assets/characters/tank-02.glb'));
+  const enemyGlb = await loader.loadAsync(asset('/assets/characters/tank-badguy.glb'));
   const firstEnemySpawn = enemySpawns[0];
   const enemyData = createEnemyTank(enemyGlb.scene, firstEnemySpawn.position, firstEnemySpawn.rotation);
   enemyRigidBody = enemyData.rigidBody;
@@ -670,6 +733,18 @@ async function init() {
   hudEl.classList.add('hud');
   document.body.appendChild(hudEl);
 
+  if (!nextLevelBtnEl) {
+    nextLevelBtnEl = document.createElement('button');
+    nextLevelBtnEl.textContent = 'Next Level';
+    nextLevelBtnEl.classList.add('next-level-btn', 'hidden');
+    nextLevelBtnEl.addEventListener('click', async () => {
+    nextLevelBtnEl.classList.add('hidden');
+    const nextId = await getNextLevelId(currentLevelId);
+    if (nextId) init(nextId, currentTankId);
+  });
+    document.body.appendChild(nextLevelBtnEl);
+  }
+
   window.addEventListener('resize', () => {
     camera.aspect = innerWidth / innerHeight;
     camera.updateProjectionMatrix();
@@ -700,7 +775,10 @@ async function init() {
   });
   document.addEventListener('keyup', (e) => (keys[e.code] = false));
 
-  animate();
+  if (!animateLoopStarted) {
+    animateLoopStarted = true;
+    animate();
+  }
 }
 
 function animate() {
@@ -938,6 +1016,7 @@ function animate() {
       enemyRigidBody = null;
       if (!winSpeechPlayed) {
         winSpeechPlayed = true;
+        markDefeated(currentLevelId);
         setTimeout(() => playRandomFrom(winSpeechBuffers), 1000);
       }
     }
@@ -1177,6 +1256,7 @@ function animate() {
             enemyRigidBody = null;
             if (!winSpeechPlayed) {
               winSpeechPlayed = true;
+              markDefeated(currentLevelId);
               setTimeout(() => playRandomFrom(winSpeechBuffers), 1000);
             }
           }
@@ -1247,6 +1327,7 @@ function animate() {
           enemyRigidBody = null;
           if (!winSpeechPlayed) {
             winSpeechPlayed = true;
+            markDefeated(currentLevelId);
             setTimeout(() => playRandomFrom(winSpeechBuffers), 1000);
           }
         }
@@ -1292,6 +1373,8 @@ function animate() {
   const healthStr = ` | HP: ${playerHealth}/${playerHealthMax}`;
   const enemyHealthStr = enemyRigidBody || enemyDead ? ` | Enemy: ${enemyHealth}/${enemyHealthMax}` : '';
   hudEl.textContent = `Weapon: ${weaponMode === 1 ? 'Cannon' : 'Laser'} | Ammo: ${cannonAmmo}/${cannonAmmoMax}${cannonCooldownStr} | Heat: ${(mgHeat * 100).toFixed(0)}%${healthStr}${enemyHealthStr}`;
+
+  if (nextLevelBtnEl && enemyDead && !playerDead && nextLevelIdForButton) nextLevelBtnEl.classList.remove('hidden');
 
   if (tankRigidBody) lastCamTarget = tankRigidBody.translation();
   else if (enemyRigidBody) lastCamTarget = enemyRigidBody.translation();
