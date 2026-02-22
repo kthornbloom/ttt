@@ -2,7 +2,8 @@
   "name": "tank-game",
   "type": "module",
   "scripts": {
-    "dev": "vite"
+    "dev": "vite",
+    "build": "vite build"
   },
   "dependencies": {
     "three": "^0.160.0",
