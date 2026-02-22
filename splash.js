@@ -191,6 +191,16 @@ function initSplash() {
   startBtn.addEventListener('mouseenter', playQuickClick);
 }
 
+export function goToMainMenu() {
+  document.getElementById('game-container').classList.add('hidden');
+  document.getElementById('splash').classList.remove('hidden');
+  document.getElementById('tank-select').classList.add('hidden');
+  document.getElementById('level-select').classList.remove('hidden');
+  const logoImg = document.querySelector('#level-select-logo img');
+  if (logoImg) logoImg.src = asset('/assets/images/Logo.svg');
+  buildLevelGrid();
+}
+
 function buildLevelGrid() {
   const levelList = document.getElementById('level-list');
   if (!levelList) return;
