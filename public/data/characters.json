@@ -15,7 +15,7 @@
         {
           "id": "cannon",
           "name": "Cannon",
-          "type": "primary",
+          "type": "cannon",
           "damage": 25,
           "cooldown": 3,
           "ammoMax": 20,
@@ -25,11 +25,12 @@
         {
           "id": "laser",
           "name": "Laser",
-          "type": "secondary",
+          "type": "laser",
           "damagePerTick": 4,
           "damageInterval": 0.1,
           "heatRate": 0.2,
           "coolRate": 0.3,
+          "heatMax": 1,
           "range": 40
         }
       ]
@@ -49,7 +50,7 @@
         {
           "id": "cannon",
           "name": "Heavy Cannon",
-          "type": "primary",
+          "type": "cannon",
           "damage": 40,
           "cooldown": 5,
           "ammoMax": 10,
@@ -57,7 +58,6 @@
           "knockbackImpulse": 35
         }
       ]
-      
     },
     {
       "id": "tank-03",
@@ -65,8 +65,8 @@
       "description": "Fast tank with improved boost but smaller minigun weapons",
       "color": "#8b4513",
       "health": 100,
-      "speed": 3,
-      "acceleration": 0.5,
+      "speed": 18,
+      "acceleration": 1.2,
       "isUnlocked": true,
       "glbPath": "/assets/characters/tank-01.glb",
       "speechPath": "/assets/audio/speech/Chauncy.mp3",
@@ -74,20 +74,21 @@
         {
           "id": "minigun",
           "name": "Minigun",
-          "type": "primary",
-          "damage": 15,
-          "cooldown": 5,
-          "ammoMax": 90,
-          "speed": 55,
-          "knockbackImpulse": 5
+          "type": "minigun",
+          "damagePerTick": 2,
+          "damageInterval": 0.08,
+          "heatRate": 0.12,
+          "coolRate": 0.25,
+          "heatMax": 1.5,
+          "range": 22
         }
       ]
     },
     {
       "id": "tank-04",
       "name": "Mable",
-      "color": "#c41e3a",
       "description": "Balanced tank with a disabler EMP weapon and a cannon",
+      "color": "#c41e3a",
       "health": 80,
       "speed": 18,
       "acceleration": 1.2,
@@ -98,7 +99,7 @@
         {
           "id": "cannon",
           "name": "Cannon",
-          "type": "primary",
+          "type": "cannon",
           "damage": 20,
           "cooldown": 2,
           "ammoMax": 25,
@@ -108,20 +109,21 @@
         {
           "id": "emp",
           "name": "EMP",
-          "type": "secondary",
+          "type": "emp",
           "cooldown": 20,
-          "range": 15
+          "range": 15,
+          "disableDuration": 4
         }
       ]
     },
     {
       "id": "tank-05",
       "name": "Poe",
-      "color": "#6b5b95",
       "description": "Fast tank with long distance cannon and rocket",
+      "color": "#6b5b95",
       "health": 120,
-      "speed": 10,
-      "acceleration": 0.8,
+      "speed": 12,
+      "acceleration": 0.9,
       "isUnlocked": true,
       "glbPath": "/assets/characters/tank-01.glb",
       "speechPath": "/assets/audio/speech/Poe.mp3",
@@ -129,22 +131,23 @@
         {
           "id": "cannon",
           "name": "Cannon",
-          "type": "primary",
+          "type": "cannon",
           "damage": 28,
           "cooldown": 4,
           "ammoMax": 18,
-          "speed": 24,
+          "speed": 28,
           "knockbackImpulse": 28
         },
         {
-          "id": "laser",
-          "name": "Beam",
-          "type": "secondary",
-          "damagePerTick": 6,
-          "damageInterval": 0.1,
-          "heatRate": 0.18,
-          "coolRate": 0.25,
-          "range": 50
+          "id": "rockets",
+          "name": "Rockets",
+          "type": "rockets",
+          "damage": 30,
+          "cooldown": 5,
+          "ammoMax": 12,
+          "speed": 22,
+          "knockbackImpulse": 30,
+          "launchAngle": 75
         }
       ]
     }

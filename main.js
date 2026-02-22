@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { getLevelGlbPath, getNextLevelId, markDefeated } from './levels.js';
-import { getCharacterGlbPath } from './characters.js';
+import { getCharacterGlbPath, getCharacterById } from './characters.js';
 
 // Resolve asset paths for both local dev (/) and GitHub Pages (/ttt/)
 const asset = (path) => import.meta.env.BASE_URL + path.replace(/^\//, '');
@@ -86,6 +86,20 @@ const enemyStuckDist = 2;
 const enemyStuckTime = 0.8;
 // ───────────────────────────────────────────────────────────────────────────
 
+function getWeapon(mode) {
+  const w = playerCharacter?.weapons;
+  if (!w || w.length === 0) return null;
+  return w[mode - 1] ?? null;
+}
+
+function isProjectileWeapon(w) {
+  return w?.type === 'cannon' || w?.type === 'rockets';
+}
+
+function isHeatBeamWeapon(w) {
+  return w?.type === 'laser' || w?.type === 'minigun';
+}
+
 const loader = new GLTFLoader();
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x261377);
@@ -153,9 +167,12 @@ let boostCooldown = 0;
 let weaponMode = 1;
 let cannonAmmo = cannonAmmoMax;
 let cannonCooldown = 0;
+let weapon2Cooldown = 0;
 let mgOverheated = false;
 let mgHeat = 0;
 let cannonBalls = [];
+let empWaves = [];
+let enemyDisabledUntil = 0;
 let fireFlash = null;
 let impactFlash = null;
 let mgLine = null;
@@ -166,10 +183,12 @@ let muzzleLight = null;
 let laserHitLight = null;
 let hudEl = null;
 let fireCannonPending = false;
+let fireRocketsPending = false;
+let fireEMPPending = false;
 let bulletHoleTexture = null;
 const bulletHoles = [];
 let laserHoleCooldown = 0;
-let playerHealth = playerHealthMax;
+let playerHealth = 100;
 let enemyHealth = enemyHealthMax;
 let playerDead = false;
 let enemyDead = false;
@@ -224,6 +243,10 @@ let winSpeechPlayed = false;
 let lossSpeechPlayed = false;
 let currentLevelId = 'level-01';
 let currentTankId = 'tank-01';
+let playerCharacter = null;
+let playerHealthMaxDynamic = 100;
+let playerMaxSpeed = 15;
+let playerAccelRate = 1;
 let nextLevelIdForButton = null;
 let nextLevelBtnEl = null;
 let animateLoopStarted = false;
@@ -300,7 +323,7 @@ function updateEngineSound() {
   if (!engineBuffer) return;
 
   const absSpeed = Math.abs(currentSpeed);
-  const normalized = Math.min(absSpeed / maxSpeed, 1);
+  const normalized = Math.min(absSpeed / playerMaxSpeed, 1);
 
   if (!engineSource && normalized > 0) {
     engineSource = audioCtx.createBufferSource();
@@ -322,15 +345,15 @@ function updateEngineSound() {
   }
 }
 
-function takeDamage(rigidBody, currentHealth, damage, weaponType, impactDir, knockbackVelRef) {
+function takeDamage(rigidBody, currentHealth, damage, weaponType, impactDir, knockbackVelRef, knockbackMagnitude = cannonKnockbackImpulse) {
   if (!rigidBody || currentHealth <= 0) return currentHealth;
   const newHealth = Math.max(0, currentHealth - damage);
   if (weaponType === 'primary' && impactDir && knockbackVelRef) {
     const len = Math.sqrt(impactDir.x ** 2 + impactDir.y ** 2 + impactDir.z ** 2) || 0.001;
     const dx = impactDir.x / len, dy = impactDir.y / len, dz = impactDir.z / len;
-    knockbackVelRef.x += dx * cannonKnockbackImpulse;
-    knockbackVelRef.y += dy * cannonKnockbackImpulse;
-    knockbackVelRef.z += dz * cannonKnockbackImpulse;
+    knockbackVelRef.x += dx * knockbackMagnitude;
+    knockbackVelRef.y += dy * knockbackMagnitude;
+    knockbackVelRef.z += dz * knockbackMagnitude;
   }
   return newHealth;
 }
@@ -470,16 +493,24 @@ function geometryToRapier(geometry, matrix) {
 async function init(levelId = 'level-01', tankId = 'tank-01') {
   currentLevelId = levelId;
   currentTankId = tankId;
+  playerCharacter = await getCharacterById(tankId);
 
   // Reset game state (for re-init when loading next level)
   playerDead = false;
   enemyDead = false;
   winSpeechPlayed = false;
   lossSpeechPlayed = false;
-  playerHealth = playerHealthMax;
+  enemyDisabledUntil = 0;
+  empWaves = [];
+  playerHealthMaxDynamic = playerCharacter?.health ?? playerHealthMax;
+  playerHealth = playerHealthMaxDynamic;
+  playerMaxSpeed = playerCharacter?.speed ?? maxSpeed;
+  playerAccelRate = playerCharacter?.acceleration ?? accelRate;
   enemyHealth = enemyHealthMax;
-  cannonAmmo = cannonAmmoMax;
+  const w1 = getWeapon(1);
+  cannonAmmo = w1?.ammoMax ?? cannonAmmoMax;
   cannonCooldown = 0;
+  weapon2Cooldown = 0;
   mgHeat = 0;
   mgOverheated = false;
   cannonBalls = [];
@@ -498,6 +529,8 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   boostCooldown = 0;
   weaponMode = 1;
   fireCannonPending = false;
+  fireRocketsPending = false;
+  fireEMPPending = false;
   laserHoleCooldown = 0;
   thudCooldown = 0;
   lastLaserDamageTime = 0;
@@ -765,13 +798,19 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     keys[e.code] = true;
     if (e.code === 'Space') {
       e.preventDefault();
-      const canFireCannon = !playerDead && weaponMode === 1 && cannonAmmo > 0 && cannonCooldown <= 0 && !e.repeat;
-      const canFireMG = !playerDead && weaponMode === 2 && mgHeat < mgHeatMax && !mgOverheated;
-      if (canFireCannon || canFireMG) barrelRecoil = 1;
-      if (canFireCannon) fireCannonPending = true;
+      const w1 = getWeapon(1);
+      const w2 = getWeapon(2);
+      const canFireProjectile = !playerDead && weaponMode === 1 && w1 && isProjectileWeapon(w1) && cannonAmmo > 0 && cannonCooldown <= 0 && !e.repeat;
+      const canFireRockets = !playerDead && weaponMode === 2 && w2?.type === 'rockets' && cannonAmmo > 0 && weapon2Cooldown <= 0 && !e.repeat;
+      const canFireEMP = !playerDead && weaponMode === 2 && w2?.type === 'emp' && weapon2Cooldown <= 0 && !e.repeat;
+      const canFireHeatBeam = !playerDead && (weaponMode === 1 || weaponMode === 2) && isHeatBeamWeapon(getWeapon(weaponMode)) && mgHeat < (getWeapon(weaponMode)?.heatMax ?? 1) && !mgOverheated;
+      if (canFireProjectile || canFireRockets || canFireEMP || canFireHeatBeam) barrelRecoil = 1;
+      if (canFireProjectile) fireCannonPending = true;
+      if (canFireRockets) fireRocketsPending = true;
+      if (canFireEMP) fireEMPPending = true;
     }
     if (e.code === 'Digit1') weaponMode = 1;
-    if (e.code === 'Digit2') weaponMode = 2;
+    if (e.code === 'Digit2' && playerCharacter?.weapons?.[1]) weaponMode = 2;
   });
   document.addEventListener('keyup', (e) => (keys[e.code] = false));
 
@@ -802,7 +841,7 @@ function animate() {
 
   const pos = tankRigidBody ? tankRigidBody.translation() : { x: 0, y: 0, z: 0 };
 
-  const targetSpeed = (!playerDead && tankRigidBody && (keys['KeyW'] ? maxSpeed : keys['KeyS'] ? -maxSpeed : 0)) || 0;
+  const targetSpeed = (!playerDead && tankRigidBody && (keys['KeyW'] ? playerMaxSpeed : keys['KeyS'] ? -playerMaxSpeed : 0)) || 0;
   const targetTurn = (!playerDead && tankRigidBody && (keys['KeyA'] ? maxTurnSpeed : keys['KeyD'] ? -maxTurnSpeed : 0)) || 0;
 
   const isBoosting = !playerDead && (keys['ShiftLeft'] || keys['ShiftRight']) && boostRemaining > 0 && boostCooldown <= 0;
@@ -815,8 +854,8 @@ function animate() {
   }
 
   const speedMult = isBoosting ? boostMultiplier : 1;
-  const speedRate = targetSpeed !== 0 ? accelRate : decelRateForward;
-  const turnRate = targetTurn !== 0 ? accelRate : decelRateTurn;
+  const speedRate = targetSpeed !== 0 ? playerAccelRate : decelRateForward;
+  const turnRate = targetTurn !== 0 ? playerAccelRate : decelRateTurn;
 
   currentSpeed += (targetSpeed * speedMult - currentSpeed) * Math.min(1, speedRate * dt);
   currentTurnSpeed += (targetTurn - currentTurnSpeed) * Math.min(1, turnRate * dt);
@@ -893,6 +932,9 @@ function animate() {
   if (thudCooldown > 0) thudCooldown -= dt;
   }
 
+  const now = performance.now() / 1000;
+  const enemyDisabled = enemyRigidBody && !enemyDead && now < enemyDisabledUntil;
+
   if (enemyRigidBody && !enemyDead) {
     const ePos = enemyRigidBody.translation();
     const pPos = tankRigidBody ? tankRigidBody.translation() : ePos;
@@ -919,8 +961,8 @@ function animate() {
     );
     enemyLastPos = { x: ePos.x, y: ePos.y, z: ePos.z };
 
-    let eTargetSpeed = dist > 8 ? enemySpeed : 0;
-    let eTargetTurn = cross.y > 0.1 ? enemyTurnSpeed : cross.y < -0.1 ? -enemyTurnSpeed : 0;
+    let eTargetSpeed = enemyDisabled ? 0 : (dist > 8 ? enemySpeed : 0);
+    let eTargetTurn = enemyDisabled ? 0 : (cross.y > 0.1 ? enemyTurnSpeed : cross.y < -0.1 ? -enemyTurnSpeed : 0);
 
     if (wallHit || (!hitPlayer && distMoved < 0.02 && eTargetSpeed > 0)) {
       enemyStuckTimer += dt;
@@ -964,7 +1006,7 @@ function animate() {
     }
     enemyCannonCooldown = Math.max(0, enemyCannonCooldown - dt);
     const facingPlayer = dotToPlayer > enemyAimThreshold;
-    if (dist < enemyShootRange && dist > 5 && enemyCannonCooldown <= 0 && tankRigidBody && !playerDead && facingPlayer) {
+    if (!enemyDisabled && dist < enemyShootRange && dist > 5 && enemyCannonCooldown <= 0 && tankRigidBody && !playerDead && facingPlayer) {
       enemyCannonCooldown = enemyShootCooldown;
       enemyMesh.updateMatrixWorld(true);
       const eBarrel = enemyMesh.getObjectByName('Barrel');
@@ -983,7 +1025,9 @@ function animate() {
           y: eForwardFull.y * cannonSpeed + eLinVel.y,
           z: eForwardFull.z * cannonSpeed + eLinVel.z
         },
-        owner: 'enemy'
+        owner: 'enemy',
+        damage: cannonDamage,
+        knockback: cannonKnockbackImpulse
       });
       scene.add(cannonBalls[cannonBalls.length - 1].mesh);
     }
@@ -1022,6 +1066,27 @@ function animate() {
     }
   }
 
+  for (let i = empWaves.length - 1; i >= 0; i--) {
+    const w = empWaves[i];
+    w.radius = Math.min(w.maxRadius, w.radius + w.expandSpeed * dt);
+    if (w.mesh) {
+      w.mesh.scale.setScalar(w.radius * 2);
+      w.mesh.material.opacity = 0.5 * (1 - w.radius / w.maxRadius);
+    }
+    if (enemyRigidBody && !enemyDead) {
+      const ePos = enemyRigidBody.translation();
+      const dx = ePos.x - w.pos.x, dz = ePos.z - w.pos.z;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist <= w.radius) {
+        enemyDisabledUntil = now + w.disableDuration;
+      }
+    }
+    if (w.radius >= w.maxRadius) {
+      if (w.mesh) scene.remove(w.mesh);
+      empWaves.splice(i, 1);
+    }
+  }
+
   if (tankMesh) {
     tankMesh.position.set(posFinal.x, posFinal.y, posFinal.z);
     tankMesh.quaternion.set(rotFinal.x, rotFinal.y, rotFinal.z, rotFinal.w);
@@ -1038,7 +1103,7 @@ function animate() {
       if (distSq < healthPickupRadius * healthPickupRadius) {
         p.collected = true;
         scene.remove(p.mesh);
-        playerHealth = Math.min(playerHealthMax, playerHealth + playerHealthMax * healthPickupAmount);
+        playerHealth = Math.min(playerHealthMaxDynamic, playerHealth + playerHealthMaxDynamic * healthPickupAmount);
         playOnce(repairBuffer);
       }
     }
@@ -1049,6 +1114,23 @@ function animate() {
     const eRot = enemyRigidBody.rotation();
     enemyMesh.position.set(ePos.x, ePos.y, ePos.z);
     enemyMesh.quaternion.set(eRot.x, eRot.y, eRot.z, eRot.w);
+    if (enemyDisabled) {
+      enemyMesh.traverse((c) => {
+        if (c.isMesh && c.material) {
+          const m = Array.isArray(c.material) ? c.material[0] : c.material;
+          if (m.emissive) m.emissive.setHex(0x2244aa);
+          if (m.emissiveIntensity !== undefined) m.emissiveIntensity = 0.3;
+        }
+      });
+    } else {
+      enemyMesh.traverse((c) => {
+        if (c.isMesh && c.material) {
+          const m = Array.isArray(c.material) ? c.material[0] : c.material;
+          if (m.emissive) m.emissive.setHex(0x000000);
+          if (m.emissiveIntensity !== undefined) m.emissiveIntensity = 0;
+        }
+      });
+    }
     if (enemyBodyGroup) {
       enemyEngineTime += dt * 370;
       enemyBodyGroup.position.y = 0.05 * Math.sin(enemyEngineTime);
@@ -1068,7 +1150,7 @@ function animate() {
     bodyGroup.position.y = (bodyDefaultY ?? 0) + 0.05 * Math.sin(engineTime);
 
     const targetRoll = -currentTurnSpeed / maxTurnSpeed * bodyRollMax;
-    const targetPitch = -currentSpeed / maxSpeed * bodyPitchMax;
+    const targetPitch = -currentSpeed / playerMaxSpeed * bodyPitchMax;
     bodyRoll += (targetRoll - bodyRoll) * bodySuspensionSoftness;
     bodyPitch += (targetPitch - bodyPitch) * bodySuspensionSoftness;
     bodyGroup.rotation.set(bodyPitch + bodyAimPitch, 0, bodyRoll);
@@ -1081,8 +1163,10 @@ function animate() {
     [wheelFR, wheelBR].forEach((w) => { if (w) w.rotation.x = wheelRotR; });
   }
 
+  const heatBeamW = getWeapon(weaponMode);
+  const heatBeamActive = heatBeamW && isHeatBeamWeapon(heatBeamW) && keys['Space'] && mgHeat < (heatBeamW.heatMax ?? 1) && !mgOverheated;
   if (barrelGroup && !playerDead && tankMesh) {
-    if (weaponMode === 2 && keys['Space'] && mgHeat < mgHeatMax && !mgOverheated) barrelRecoil = 1;
+    if (heatBeamActive) barrelRecoil = 1;
     barrelRecoil = Math.max(0, barrelRecoil - recoilSpeed * dt);
     barrelGroup.position.z = (barrelDefaultZ ?? 0) + recoilAmount * barrelRecoil;
   }
@@ -1094,27 +1178,86 @@ function animate() {
     : new THREE.Vector3(0, 0, -1);
   if (muzzleLight) muzzleLight.position.copy(barrelTip).addScaledVector(fireForward.clone().normalize(), 1.5);
 
-  if (!playerDead && tankRigidBody && fireCannonPending && cannonAmmo > 0 && cannonCooldown <= 0) {
+  const w1 = getWeapon(1);
+  const w2 = getWeapon(2);
+  const cannonW = w1?.type === 'cannon' ? w1 : null;
+  const rocketsW = (weaponMode === 2 ? w2 : w1)?.type === 'rockets' ? (weaponMode === 2 ? w2 : w1) : null;
+
+  if (!playerDead && tankRigidBody && fireCannonPending && cannonW && cannonAmmo > 0 && cannonCooldown <= 0) {
     fireCannonPending = false;
     cannonAmmo--;
-    cannonCooldown = cannonCooldownTime;
+    cannonCooldown = cannonW.cooldown ?? cannonCooldownTime;
     playOnce(shootBuffer);
     playOnce(reloadBuffer);
     const linVel = tankRigidBody.linvel();
+    const spd = cannonW.speed ?? cannonSpeed;
     cannonBalls.push({
       mesh: new THREE.Mesh(cannonBallGeo, cannonBallMat),
       pos: { x: barrelTip.x, y: barrelTip.y, z: barrelTip.z },
       vel: {
-        x: fireForward.x * cannonSpeed + linVel.x,
-        y: fireForward.y * cannonSpeed + linVel.y,
-        z: fireForward.z * cannonSpeed + linVel.z
+        x: fireForward.x * spd + linVel.x,
+        y: fireForward.y * spd + linVel.y,
+        z: fireForward.z * spd + linVel.z
       },
-      owner: 'player'
+      owner: 'player',
+      damage: cannonW.damage ?? cannonDamage,
+      knockback: cannonW.knockbackImpulse ?? cannonKnockbackImpulse
     });
     scene.add(cannonBalls[cannonBalls.length - 1].mesh);
     fireFlash.position.copy(barrelTip);
     fireFlash.visible = true;
     muzzleLight.intensity = 20;
+  }
+
+  if (!playerDead && tankRigidBody && fireRocketsPending && rocketsW && cannonAmmo > 0 && weapon2Cooldown <= 0) {
+    fireRocketsPending = false;
+    cannonAmmo--;
+    weapon2Cooldown = rocketsW.cooldown ?? 5;
+    playOnce(shootBuffer);
+    playOnce(reloadBuffer);
+    const linVel = tankRigidBody.linvel();
+    const angleRad = (rocketsW.launchAngle ?? 75) * Math.PI / 180;
+    const fwd = fireForward.clone().normalize();
+    const up = new THREE.Vector3(0, 1, 0);
+    const launchDir = new THREE.Vector3().addVectors(
+      fwd.clone().multiplyScalar(Math.cos(angleRad)),
+      up.clone().multiplyScalar(Math.sin(angleRad))
+    ).normalize();
+    const rocketOrigin = new THREE.Vector3(posFinal.x, posFinal.y + 2, posFinal.z);
+    const spd = rocketsW.speed ?? 22;
+    cannonBalls.push({
+      mesh: new THREE.Mesh(cannonBallGeo, new THREE.MeshStandardMaterial({ color: 0x888888, emissive: 0x444444 })),
+      pos: { x: rocketOrigin.x, y: rocketOrigin.y, z: rocketOrigin.z },
+      vel: {
+        x: launchDir.x * spd + linVel.x,
+        y: launchDir.y * spd + linVel.y,
+        z: launchDir.z * spd + linVel.z
+      },
+      owner: 'player',
+      damage: rocketsW.damage ?? 30,
+      knockback: rocketsW.knockbackImpulse ?? 30
+    });
+    scene.add(cannonBalls[cannonBalls.length - 1].mesh);
+    fireFlash.position.copy(rocketOrigin);
+    fireFlash.visible = true;
+    muzzleLight.intensity = 20;
+  }
+
+  if (!playerDead && tankRigidBody && fireEMPPending && w2?.type === 'emp' && weapon2Cooldown <= 0) {
+    fireEMPPending = false;
+    weapon2Cooldown = w2.cooldown ?? 20;
+    const range = w2.range ?? 15;
+    const duration = w2.disableDuration ?? 4;
+    const expandSpeed = range / 1.5;
+    const mesh = new THREE.Mesh(
+      new THREE.RingGeometry(0.49, 0.5, 32),
+      new THREE.MeshBasicMaterial({ color: 0x4488ff, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false })
+    );
+    mesh.position.set(posFinal.x, posFinal.y + 0.5, posFinal.z);
+    mesh.rotation.x = -Math.PI / 2;
+    scene.add(mesh);
+    empWaves.push({ pos: { x: posFinal.x, y: posFinal.y + 0.5, z: posFinal.z }, radius: 0, maxRadius: range, expandSpeed, disableDuration: duration, mesh });
+    playOnce(hissBuffer);
   }
   if (fireFlash && fireFlash.visible) {
     fireFlash.material.opacity = (fireFlash.material.opacity ?? 1) - 8 * dt;
@@ -1142,20 +1285,33 @@ function animate() {
       impactFlash.material.opacity = 1;
     }
   }
-  if (muzzleLight && muzzleLight.intensity > 0 && !(weaponMode === 2 && keys['Space'] && mgHeat < mgHeatMax && !mgOverheated)) {
+  if (muzzleLight && muzzleLight.intensity > 0 && !heatBeamActive) {
     muzzleLight.intensity = Math.max(0, muzzleLight.intensity - 120 * dt);
   }
 
   if (!playerDead && tankRigidBody && barrelGroup && tankMesh) {
     const fd = fireForward.clone().normalize();
-    if (weaponMode === 1) {
+    const trajW = getWeapon(weaponMode);
+    const showProjectileTrajectory = trajW && isProjectileWeapon(trajW);
+    const showHeatBeamTrajectory = trajW && isHeatBeamWeapon(trajW);
+
+    if (showProjectileTrajectory) {
       cannonTrajectoryLine.visible = true;
       laserTrajectoryLine.visible = false;
-      trajectoryBarrelTip.lerp(barrelTip, trajectoryBarrelSmooth);
-      if (trajectoryBarrelTip.distanceTo(barrelTip) > 5) trajectoryBarrelTip.copy(barrelTip);
+      const rocketOrigin = trajW.type === 'rockets'
+        ? new THREE.Vector3(posFinal.x, posFinal.y + 2, posFinal.z)
+        : barrelTip.clone();
+      trajectoryBarrelTip.lerp(rocketOrigin, trajectoryBarrelSmooth);
+      if (trajectoryBarrelTip.distanceTo(rocketOrigin) > 5) trajectoryBarrelTip.copy(rocketOrigin);
       const linVel = tankRigidBody.linvel();
+      const spd = trajW.speed ?? cannonSpeed;
+      const angleRad = (trajW.launchAngle ?? 0) * Math.PI / 180;
+      const up = new THREE.Vector3(0, 1, 0);
+      const launchDir = angleRad > 0
+        ? new THREE.Vector3().addVectors(fd.clone().multiplyScalar(Math.cos(angleRad)), up.clone().multiplyScalar(Math.sin(angleRad))).normalize()
+        : fd.clone();
       const x0 = trajectoryBarrelTip.x, y0 = trajectoryBarrelTip.y, z0 = trajectoryBarrelTip.z;
-      const vx = fd.x * cannonSpeed + linVel.x, vy = fd.y * cannonSpeed + linVel.y, vz = fd.z * cannonSpeed + linVel.z;
+      const vx = launchDir.x * spd + linVel.x, vy = launchDir.y * spd + linVel.y, vz = launchDir.z * spd + linVel.z;
       const g = cannonGravity;
       const disc = vy * vy + 2 * g * y0;
       const tGround = disc >= 0 ? (vy + Math.sqrt(disc)) / g : 999;
@@ -1191,19 +1347,25 @@ function animate() {
       const lastIdx = posArr.length - 3;
       cannonTrajectoryEndSphere.position.set(posArr[lastIdx], posArr[lastIdx + 1], posArr[lastIdx + 2]);
       cannonTrajectoryEndSphere.visible = true;
-    } else {
+    } else if (showHeatBeamTrajectory) {
       cannonTrajectoryLine.visible = false;
       if (cannonTrajectoryEndSphere) cannonTrajectoryEndSphere.visible = false;
-      const showLaserPreview = !keys['Space'] || mgHeat >= mgHeatMax || mgOverheated;
+      const beamRangeTraj = heatBeamW?.range ?? mgRange;
+      const beamHeatMaxTraj = heatBeamW?.heatMax ?? mgHeatMax;
+      const showLaserPreview = !keys['Space'] || mgHeat >= beamHeatMaxTraj || mgOverheated;
       if (showLaserPreview) {
         laserTrajectoryLine.visible = true;
-        const end = new THREE.Vector3(barrelTip.x + fd.x * mgRange, barrelTip.y + fd.y * mgRange, barrelTip.z + fd.z * mgRange);
+        const end = new THREE.Vector3(barrelTip.x + fd.x * beamRangeTraj, barrelTip.y + fd.y * beamRangeTraj, barrelTip.z + fd.z * beamRangeTraj);
         laserTrajectoryLine.geometry.setPositions([barrelTip.x, barrelTip.y, barrelTip.z, end.x, end.y, end.z]);
         laserTrajectoryLine.geometry.attributes.position.needsUpdate = true;
         if (laserTrajectoryLine.material.resolution) laserTrajectoryLine.material.resolution.set(innerWidth, innerHeight);
       } else {
         laserTrajectoryLine.visible = false;
       }
+    } else {
+      cannonTrajectoryLine.visible = false;
+      if (cannonTrajectoryEndSphere) cannonTrajectoryEndSphere.visible = false;
+      laserTrajectoryLine.visible = false;
     }
   } else {
     if (cannonTrajectoryLine) cannonTrajectoryLine.visible = false;
@@ -1212,8 +1374,8 @@ function animate() {
   }
 
   if (cannonCooldown > 0) cannonCooldown = Math.max(0, cannonCooldown - dt);
+  if (weapon2Cooldown > 0) weapon2Cooldown = Math.max(0, weapon2Cooldown - dt);
 
-  const now = performance.now() / 1000;
   for (let i = bulletHoles.length - 1; i >= 0; i--) {
     const age = now - bulletHoles[i].createdAt;
     if (age >= bulletHoleLifetime) {
@@ -1247,7 +1409,7 @@ function animate() {
       if (hit) {
         const hitParent = hit.collider.parent();
         if (hitParent === enemyRigidBody && cb.owner === 'player' && !enemyDead) {
-          enemyHealth = takeDamage(enemyRigidBody, enemyHealth, cannonDamage, 'primary', dir, enemyKnockbackVel);
+          enemyHealth = takeDamage(enemyRigidBody, enemyHealth, cb.damage ?? cannonDamage, 'primary', dir, enemyKnockbackVel, cb.knockback ?? cannonKnockbackImpulse);
           if (enemyHealth <= 0) {
             enemyDead = true;
             playOnce(explodeBuffer);
@@ -1261,7 +1423,7 @@ function animate() {
             }
           }
         } else if (hitParent === tankRigidBody && cb.owner === 'enemy' && !playerDead) {
-          playerHealth = takeDamage(tankRigidBody, playerHealth, cannonDamage, 'primary', dir, playerKnockbackVel);
+          playerHealth = takeDamage(tankRigidBody, playerHealth, cb.damage ?? cannonDamage, 'primary', dir, playerKnockbackVel, cb.knockback ?? cannonKnockbackImpulse);
           if (playerHealth <= 0) {
             playerDead = true;
             playOnce(explodeBuffer);
@@ -1296,14 +1458,22 @@ function animate() {
     return true;
   });
 
-  const wantsToFireLaser = !playerDead && weaponMode === 2 && keys['Space'];
-  if (wantsToFireLaser && mgHeat < mgHeatMax && !mgOverheated) {
-    mgHeat = Math.min(mgHeatMax, mgHeat + mgHeatRate * dt);
-    if (mgHeat >= mgHeatMax) {
+  const wantsToFireHeatBeam = !playerDead && heatBeamW && isHeatBeamWeapon(heatBeamW) && keys['Space'];
+  const beamHeatMax = heatBeamW?.heatMax ?? mgHeatMax;
+  const beamHeatRate = heatBeamW?.heatRate ?? mgHeatRate;
+  const beamCoolRate = heatBeamW?.coolRate ?? mgCoolRate;
+  const beamRange = heatBeamW?.range ?? mgRange;
+  const beamDamagePerTick = heatBeamW?.damagePerTick ?? laserDamagePerTick;
+  const beamDamageInterval = heatBeamW?.damageInterval ?? laserDamageInterval;
+  const isMinigun = heatBeamW?.type === 'minigun';
+
+  if (wantsToFireHeatBeam && mgHeat < beamHeatMax && !mgOverheated) {
+    mgHeat = Math.min(beamHeatMax, mgHeat + beamHeatRate * dt);
+    if (mgHeat >= beamHeatMax) {
       mgOverheated = true;
       playOnce(hissBuffer);
     }
-    if (mgHeat < mgHeatMax) {
+    if (mgHeat < beamHeatMax) {
       startLaserSound();
       muzzleLight.intensity = 12;
       const fd = fireForward.clone().normalize();
@@ -1311,14 +1481,14 @@ function animate() {
         { x: barrelTip.x, y: barrelTip.y, z: barrelTip.z },
         { x: fd.x, y: fd.y, z: fd.z }
       );
-      const hit = world.castRayAndGetNormal(ray, mgRange, true, null, null, null, tankRigidBody);
-      const end = hit ? Math.max(0.05, Math.min(mgRange, hit.toi)) : mgRange;
+      const hit = world.castRayAndGetNormal(ray, beamRange, true, null, null, null, tankRigidBody);
+      const end = hit ? Math.max(0.05, Math.min(beamRange, hit.toi)) : beamRange;
       laserHitLight.position.set(barrelTip.x + fd.x * end, barrelTip.y + fd.y * end, barrelTip.z + fd.z * end);
       laserHitLight.intensity = 8;
       const hitParent = hit?.collider?.parent?.();
-      if (hitParent === enemyRigidBody && !enemyDead && (now - lastLaserDamageTime) >= laserDamageInterval) {
+      if (hitParent === enemyRigidBody && !enemyDead && (now - lastLaserDamageTime) >= beamDamageInterval) {
         lastLaserDamageTime = now;
-        enemyHealth = takeDamage(enemyRigidBody, enemyHealth, laserDamagePerTick, 'secondary', null, null);
+        enemyHealth = takeDamage(enemyRigidBody, enemyHealth, beamDamagePerTick, 'secondary', null, null);
         if (enemyHealth <= 0) {
           enemyDead = true;
           playOnce(explodeBuffer);
@@ -1350,7 +1520,11 @@ function animate() {
         const f = i / (mgSegments - 1);
         posArr.push(barrelTip.x + fd.x * end * f, barrelTip.y + fd.y * end * f, barrelTip.z + fd.z * end * f);
         const bright = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(t + (1 - f) * 8));
-        colArr.push(bright, bright * 0.4, 0);
+        if (isMinigun) {
+          colArr.push(bright, bright, bright);
+        } else {
+          colArr.push(bright, bright * 0.4, 0);
+        }
       }
       mgLine.geometry.setPositions(posArr);
       mgLine.geometry.setColors(colArr);
@@ -1364,15 +1538,19 @@ function animate() {
     mgLine.visible = false;
     if (laserHitLight) laserHitLight.intensity = 0;
     laserHoleCooldown = 0;
-    const coolRate = mgOverheated ? mgCoolRateOverheated : mgCoolRate;
+    const coolRate = mgOverheated ? mgCoolRateOverheated : beamCoolRate;
     mgHeat = Math.max(0, mgHeat - coolRate * dt);
     if (mgHeat <= 0) mgOverheated = false;
   }
 
+  const currentWeapon = getWeapon(weaponMode);
+  const weaponName = currentWeapon?.name ?? (weaponMode === 1 ? 'Cannon' : 'Laser');
   const cannonCooldownStr = cannonCooldown > 0 ? ` | Cooldown: ${cannonCooldown.toFixed(1)}s` : '';
-  const healthStr = ` | HP: ${playerHealth}/${playerHealthMax}`;
+  const weapon2CooldownStr = weapon2Cooldown > 0 && weaponMode === 2 ? ` | Cooldown: ${weapon2Cooldown.toFixed(1)}s` : '';
+  const heatStr = (heatBeamW && isHeatBeamWeapon(heatBeamW)) ? ` | Heat: ${(mgHeat * 100).toFixed(0)}%` : '';
+  const healthStr = ` | HP: ${playerHealth}/${playerHealthMaxDynamic}`;
   const enemyHealthStr = enemyRigidBody || enemyDead ? ` | Enemy: ${enemyHealth}/${enemyHealthMax}` : '';
-  hudEl.textContent = `Weapon: ${weaponMode === 1 ? 'Cannon' : 'Laser'} | Ammo: ${cannonAmmo}/${cannonAmmoMax}${cannonCooldownStr} | Heat: ${(mgHeat * 100).toFixed(0)}%${healthStr}${enemyHealthStr}`;
+  hudEl.textContent = `Weapon: ${weaponName} | Ammo: ${cannonAmmo}/${cannonAmmoMax}${cannonCooldownStr}${weapon2CooldownStr}${heatStr}${healthStr}${enemyHealthStr}`;
 
   if (nextLevelBtnEl && enemyDead && !playerDead && nextLevelIdForButton) nextLevelBtnEl.classList.remove('hidden');
 
