@@ -10,6 +10,7 @@ import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { HorizontalTiltShiftShader } from 'three/addons/shaders/HorizontalTiltShiftShader.js';
 import { VerticalTiltShiftShader } from 'three/addons/shaders/VerticalTiltShiftShader.js';
 import RAPIER from '@dimforge/rapier3d';
@@ -19,7 +20,7 @@ const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 const showCollisionBox = false;
 
 const camHeight = 20;
-const camDist = 20;
+const camDist = 25;
 
 const maxSpeed = 15;
 const maxTurnSpeed = 1.8;
@@ -64,13 +65,14 @@ const bodySuspensionSoftness = 0.07;
 const bodyAimMax = 0.5;
 const bodyAimSpeed = 0.7;
 const cannonGravity = 10;
+const fallDeathY = -15;
 
 const playerHealthMax = 100;
 const enemyHealthMax = 100;
 const cannonDamage = 25;
 const cannonKnockbackImpulse = 25;
 const cannonKnockbackDecay = .94;
-const laserDamagePerTick = 8;
+const laserDamagePerTick = 4;
 const laserDamageInterval = 0.1;
 const enemySpeed = 3;
 const enemyTurnSpeed = 1;
@@ -96,7 +98,8 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.2;
-document.body.appendChild(renderer.domElement);
+const gameContainer = document.getElementById('game-container');
+(gameContainer || document.body).appendChild(renderer.domElement);
 
 // Post Processing (Tilt‑Shift via Screen-Space Blur)
 const composer = new EffectComposer(renderer);
@@ -112,12 +115,13 @@ hTilt.uniforms.r.value = 0.5;
 vTilt.uniforms.r.value = 0.5;
 
 // h/v control blur intensity. Smaller = tighter blur falloff.
-hTilt.uniforms.h.value = .5 / innerWidth * 10.0;
-vTilt.uniforms.v.value = .5 / innerHeight * 10.0;
+hTilt.uniforms.h.value = .1 / innerWidth * 30.0;
+vTilt.uniforms.v.value = .1 / innerHeight * 30.0;
 
 // Add passes
-// composer.addPass(hTilt);
-// composer.addPass(vTilt);
+composer.addPass(hTilt);
+composer.addPass(vTilt);
+composer.addPass(new OutputPass()); // Tone mapping + sRGB for correct display (skipped when rendering to RT)
 
 const light = new THREE.DirectionalLight(0xffffff, 2);
 light.position.set(20, 40, 20);
@@ -186,7 +190,10 @@ let trajectoryBarrelTip = new THREE.Vector3(0, 0, 0);
 let impactFlashAge = -1;
 let playerKnockbackVel = { x: 0, y: 0, z: 0 };
 let enemyKnockbackVel = { x: 0, y: 0, z: 0 };
+let healthPickups = [];
 const impactFlashDuration = 0.7;
+const healthPickupRadius = 2.5;
+const healthPickupAmount = 0.3;
 const cannonBallGeo = new THREE.SphereGeometry(0.2, 8, 8);
 const cannonBallMat = new THREE.MeshStandardMaterial({
   color: 0xff6600,
@@ -205,6 +212,14 @@ let laserBuffer = null;
 let shootBuffer = null;
 let reloadBuffer = null;
 let laserSource = null;
+let explodeBuffer = null;
+let repairBuffer = null;
+let thudBuffer = null;
+let winSpeechBuffers = [];
+let lossSpeechBuffers = [];
+let thudCooldown = 0;
+let winSpeechPlayed = false;
+let lossSpeechPlayed = false;
 
 async function loadAudio(url) {
   try {
@@ -231,12 +246,31 @@ async function loadWeaponSounds() {
   ]);
 }
 
+async function loadGameSounds() {
+  const winFiles = ['win-1.mp3', 'win-2.mp3', 'win-3.mp3'];
+  const lossFiles = ['loss-1.mp3', 'loss-2.mp3', 'loss-3.mp3'];
+  const results = await Promise.all([
+    loadAudio(asset('/assets/audio/explode.mp3')),
+    loadAudio(asset('/assets/audio/repair.mp3')),
+    loadAudio(asset('/assets/audio/thud.mp3')),
+    ...winFiles.map((f) => loadAudio(asset(`/assets/audio/speech/win/${f}`))),
+    ...lossFiles.map((f) => loadAudio(asset(`/assets/audio/speech/loss/${f}`)))
+  ]);
+  [explodeBuffer, repairBuffer, thudBuffer, ...winSpeechBuffers] = results;
+  lossSpeechBuffers = results.slice(6, 9);
+}
+
 function playOnce(buffer) {
   if (!buffer) return;
   const src = audioCtx.createBufferSource();
   src.buffer = buffer;
   src.connect(audioCtx.destination);
   src.start(0);
+}
+
+function playRandomFrom(buffers) {
+  const valid = buffers.filter(Boolean);
+  if (valid.length) playOnce(valid[Math.floor(Math.random() * valid.length)]);
 }
 
 function startLaserSound() {
@@ -317,7 +351,7 @@ function addBulletHole(hitPoint, hitNormal, bulletDir, size) {
   bulletHoles.push({ mesh: hole, createdAt: performance.now() / 1000 });
 }
 
-function createEnemyTank(tankTemplate) {
+function createEnemyTank(tankTemplate, spawnPos = { x: 15, y: 2, z: 15 }, spawnRot = null) {
   const enemy = tankTemplate.clone();
   enemy.traverse((c) => {
     if (c.isMesh) {
@@ -343,7 +377,11 @@ function createEnemyTank(tankTemplate) {
       .setAngularDamping(15)
   );
   const col = world.createCollider(collider, rb);
-  rb.setTranslation({ x: 15, y: 2, z: 15 }, true);
+  const pos = spawnPos instanceof THREE.Vector3 ? spawnPos : { x: spawnPos.x, y: spawnPos.y, z: spawnPos.z };
+  rb.setTranslation({ x: pos.x, y: pos.y ?? 2, z: pos.z }, true);
+  if (spawnRot && (spawnRot instanceof THREE.Quaternion || (spawnRot.x !== undefined && spawnRot.w !== undefined))) {
+    rb.setRotation(spawnRot instanceof THREE.Quaternion ? { x: spawnRot.x, y: spawnRot.y, z: spawnRot.z, w: spawnRot.w } : spawnRot, true);
+  }
   scene.add(enemy);
   return { mesh: enemy, body, barrel, wFL, wFR, wBL, wBR, rigidBody: rb, collider: col };
 }
@@ -371,6 +409,41 @@ function explodeTank(mesh, rigidBody) {
   return pieces;
 }
 
+// Spawn naming: "Spawn_Player", "Spawn_Player_North", "Spawn_Enemy_Tank_01", etc.
+// Direction suffix (e.g. _North) is optional; rotation comes from the object's transform in Blender.
+const SPAWN_NAMES = {
+  player: 'Spawn_Player',
+  enemyTank: 'Spawn_Enemy_Tank',
+  enemyTurret: 'Spawn_Enemy_Turret',
+  health: 'Spawn_Health'
+};
+
+function collectSpawnPoints(level) {
+  level.updateMatrixWorld(true);
+  const spawns = { player: null, enemyTank: [], enemyTurret: [], health: [] };
+  const toRemove = [];
+  level.traverse((c) => {
+    if (c.name.startsWith(SPAWN_NAMES.player)) {
+      if (!spawns.player) spawns.player = { position: c.getWorldPosition(new THREE.Vector3()), rotation: c.getWorldQuaternion(new THREE.Quaternion()) };
+      toRemove.push(c);
+    } else if (c.name.startsWith(SPAWN_NAMES.enemyTank)) {
+      spawns.enemyTank.push({ position: c.getWorldPosition(new THREE.Vector3()), rotation: c.getWorldQuaternion(new THREE.Quaternion()) });
+      toRemove.push(c);
+    } else if (c.name.startsWith(SPAWN_NAMES.enemyTurret)) {
+      spawns.enemyTurret.push({ position: c.getWorldPosition(new THREE.Vector3()), rotation: c.getWorldQuaternion(new THREE.Quaternion()) });
+      toRemove.push(c);
+    } else if (c.name.startsWith(SPAWN_NAMES.health)) {
+      spawns.health.push({ position: c.getWorldPosition(new THREE.Vector3()), rotation: c.getWorldQuaternion(new THREE.Quaternion()) });
+      toRemove.push(c);
+    }
+  });
+  toRemove.forEach((obj) => {
+    const parent = obj.parent;
+    if (parent) parent.remove(obj);
+  });
+  return spawns;
+}
+
 function geometryToRapier(geometry, matrix) {
   const g = matrix ? geometry.clone().applyMatrix4(matrix) : geometry;
   const pos = g.attributes.position;
@@ -394,9 +467,27 @@ async function init() {
   const levelGlb = await loader.loadAsync(asset('/assets/levels/level-01.glb'));
   const level = levelGlb.scene;
   level.updateMatrixWorld(true);
+
+  const spawns = collectSpawnPoints(level);
+  const playerPos = spawns.player?.position ?? new THREE.Vector3(0, 2, 0);
+  const playerRot = spawns.player?.rotation ?? new THREE.Quaternion();
+  const enemySpawns = spawns.enemyTank.length > 0 ? spawns.enemyTank : [{ position: { x: 15, y: 2, z: 15 } }];
+
   level.traverse((c) => {
-    if (c.isMesh) {
+    if (c.isMesh && !c.name.startsWith('Spawn_')) {
       c.castShadow = c.receiveShadow = true;
+      // Fix transparent materials: depthWrite causes flickering when semi-transparent
+      // surfaces overlap or interact with fog. Shadows render separately so they stay visible.
+      const mats = Array.isArray(c.material) ? c.material : [c.material];
+      for (const m of mats) {
+        if (m?.transparent) {
+          // alphaTest: treat visible pixels as opaque for depth - fixes overlap/floor z-fighting
+          // while preserving the look. Threshold keeps pixels with alpha >= 0.5.
+          m.alphaTest = 0.5;
+          m.depthWrite = true; // Safe with alphaTest - no transparent sorting issues
+          m.fog = true; // Can re-enable fog now
+        }
+      }
       const { vertices, indices } = geometryToRapier(c.geometry, c.matrixWorld);
       const collider = RAPIER.ColliderDesc.trimesh(vertices, indices)
         .setFriction(1.0)
@@ -444,12 +535,14 @@ async function init() {
   );
 
   world.createCollider(tankCollider, tankRigidBody);
-  tankRigidBody.setTranslation({ x: 0, y: 2, z: 0 }, true);
+  tankRigidBody.setTranslation({ x: playerPos.x, y: playerPos.y, z: playerPos.z }, true);
+  tankRigidBody.setRotation({ x: playerRot.x, y: playerRot.y, z: playerRot.z, w: playerRot.w }, true);
 
   scene.add(tankMesh);
 
   const enemyGlb = await loader.loadAsync(asset('/assets/characters/tank-02.glb'));
-  const enemyData = createEnemyTank(enemyGlb.scene);
+  const firstEnemySpawn = enemySpawns[0];
+  const enemyData = createEnemyTank(enemyGlb.scene, firstEnemySpawn.position, firstEnemySpawn.rotation);
   enemyRigidBody = enemyData.rigidBody;
   enemyMesh = enemyData.mesh;
   enemyBodyGroup = enemyData.body;
@@ -462,6 +555,25 @@ async function init() {
 
   await loadEngineSound();
   await loadWeaponSounds();
+  await loadGameSounds();
+
+  // Health pickups at Spawn_Health positions
+  if (spawns.health.length > 0) {
+    try {
+      const healthGlb = await loader.loadAsync(asset('/assets/items/health.glb'));
+      const healthTemplate = healthGlb.scene;
+      healthTemplate.traverse((c) => { if (c.isMesh) c.castShadow = c.receiveShadow = true; });
+      for (const s of spawns.health) {
+        const pickup = healthTemplate.clone();
+        pickup.position.copy(s.position);
+        pickup.quaternion.copy(s.rotation);
+        scene.add(pickup);
+        healthPickups.push({ mesh: pickup, collected: false });
+      }
+    } catch (e) {
+      console.warn('Health pickup model not found, skipping:', e.message);
+    }
+  }
 
   const flashGeo = new THREE.SphereGeometry(0.3, 8, 8);
   const flashMat = new THREE.MeshBasicMaterial({ color: 0xffaa44, transparent: true, opacity: 1 });
@@ -555,7 +667,7 @@ async function init() {
   });
 
   hudEl = document.createElement('div');
-  hudEl.style.cssText = 'position:fixed;bottom:0;left:0;right:0;padding:8px;background:rgba(0,0,0,0.5);color:#fff;font:14px monospace;';
+  hudEl.classList.add('hud');
   document.body.appendChild(hudEl);
 
   window.addEventListener('resize', () => {
@@ -685,6 +797,22 @@ function animate() {
       );
     }
   }
+
+  // Wall collision thud: when moving and hitting static geometry
+  if (!playerDead && tankRigidBody && thudCooldown <= 0 && Math.abs(currentSpeed) > 1) {
+    const fwdDir = currentSpeed > 0 ? forward : forward.clone().negate();
+    const fwdRay = new RAPIER.Ray(
+      { x: pos.x + fwdDir.x * 0.5, y: pos.y, z: pos.z + fwdDir.z * 0.5 },
+      { x: fwdDir.x, y: 0, z: fwdDir.z }
+    );
+    const fwdHit = world.castRay(fwdRay, 2.5, true, null, null, null, tankRigidBody);
+    const hitEnemy = fwdHit && enemyRigidBody && fwdHit.collider.parent() === enemyRigidBody;
+    if (fwdHit && !hitEnemy) {
+      playOnce(thudBuffer);
+      thudCooldown = 0.4;
+    }
+  }
+  if (thudCooldown > 0) thudCooldown -= dt;
   }
 
   if (enemyRigidBody && !enemyDead) {
@@ -788,9 +916,53 @@ function animate() {
   const posFinal = tankRigidBody ? tankRigidBody.translation() : { x: 0, y: 0, z: 0 };
   const rotFinal = tankRigidBody ? tankRigidBody.rotation() : { x: 0, y: 0, z: 0, w: 1 };
 
+  // Fall off map: destroy player or enemy when they fall into the abyss
+  if (tankRigidBody && !playerDead && posFinal.y < fallDeathY) {
+    playerDead = true;
+    playOnce(explodeBuffer);
+    explosionPieces.push(...explodeTank(tankMesh, tankRigidBody));
+    tankMesh = null;
+    tankRigidBody = null;
+    if (!lossSpeechPlayed) {
+      lossSpeechPlayed = true;
+      setTimeout(() => playRandomFrom(lossSpeechBuffers), 1000);
+    }
+  }
+  if (enemyRigidBody && !enemyDead) {
+    const ePos = enemyRigidBody.translation();
+    if (ePos.y < fallDeathY) {
+      enemyDead = true;
+      playOnce(explodeBuffer);
+      explosionPieces.push(...explodeTank(enemyMesh, enemyRigidBody));
+      enemyMesh = null;
+      enemyRigidBody = null;
+      if (!winSpeechPlayed) {
+        winSpeechPlayed = true;
+        setTimeout(() => playRandomFrom(winSpeechBuffers), 1000);
+      }
+    }
+  }
+
   if (tankMesh) {
     tankMesh.position.set(posFinal.x, posFinal.y, posFinal.z);
     tankMesh.quaternion.set(rotFinal.x, rotFinal.y, rotFinal.z, rotFinal.w);
+  }
+
+  // Health pickup collection
+  if (!playerDead && tankRigidBody) {
+    for (const p of healthPickups) {
+      if (p.collected) continue;
+      const dx = p.mesh.position.x - posFinal.x;
+      const dy = p.mesh.position.y - posFinal.y;
+      const dz = p.mesh.position.z - posFinal.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      if (distSq < healthPickupRadius * healthPickupRadius) {
+        p.collected = true;
+        scene.remove(p.mesh);
+        playerHealth = Math.min(playerHealthMax, playerHealth + playerHealthMax * healthPickupAmount);
+        playOnce(repairBuffer);
+      }
+    }
   }
 
   if (enemyMesh && enemyRigidBody) {
@@ -910,7 +1082,25 @@ function animate() {
       const tGround = disc >= 0 ? (vy + Math.sqrt(disc)) / g : 999;
       const hSpeed = Math.sqrt(vx * vx + vz * vz) || 0.001;
       const tDist = 500 / hSpeed;
-      const tMax = Math.min(tGround, tDist, 30);
+      let tMax = Math.min(tGround, tDist, 30);
+      // Raycast along arc segments to stop trajectory on enemy or walls
+      for (let i = 0; i < trajectoryArcSegments; i++) {
+        const t0 = (i / trajectoryArcSegments) * tMax;
+        const t1 = ((i + 1) / trajectoryArcSegments) * tMax;
+        const px0 = x0 + vx * t0; const py0 = y0 + vy * t0 - 0.5 * g * t0 * t0; const pz0 = z0 + vz * t0;
+        const px1 = x0 + vx * t1; const py1 = y0 + vy * t1 - 0.5 * g * t1 * t1; const pz1 = z0 + vz * t1;
+        const segDx = px1 - px0; const segDy = py1 - py0; const segDz = pz1 - pz0;
+        const segDist = Math.sqrt(segDx * segDx + segDy * segDy + segDz * segDz) || 0.001;
+        const ray = new RAPIER.Ray(
+          { x: px0, y: py0, z: pz0 },
+          { x: segDx / segDist, y: segDy / segDist, z: segDz / segDist }
+        );
+        const hit = world.castRayAndGetNormal(ray, segDist + 0.1, true, null, null, null, tankRigidBody);
+        if (hit && hit.toi < segDist) {
+          tMax = t0 + (hit.toi / segDist) * (t1 - t0);
+          break;
+        }
+      }
       const posArr = [];
       for (let i = 0; i <= trajectoryArcSegments; i++) {
         const t = (i / trajectoryArcSegments) * tMax;
@@ -981,17 +1171,27 @@ function animate() {
           enemyHealth = takeDamage(enemyRigidBody, enemyHealth, cannonDamage, 'primary', dir, enemyKnockbackVel);
           if (enemyHealth <= 0) {
             enemyDead = true;
+            playOnce(explodeBuffer);
             explosionPieces.push(...explodeTank(enemyMesh, enemyRigidBody));
             enemyMesh = null;
             enemyRigidBody = null;
+            if (!winSpeechPlayed) {
+              winSpeechPlayed = true;
+              setTimeout(() => playRandomFrom(winSpeechBuffers), 1000);
+            }
           }
         } else if (hitParent === tankRigidBody && cb.owner === 'enemy' && !playerDead) {
           playerHealth = takeDamage(tankRigidBody, playerHealth, cannonDamage, 'primary', dir, playerKnockbackVel);
           if (playerHealth <= 0) {
             playerDead = true;
+            playOnce(explodeBuffer);
             explosionPieces.push(...explodeTank(tankMesh, tankRigidBody));
             tankMesh = null;
             tankRigidBody = null;
+            if (!lossSpeechPlayed) {
+              lossSpeechPlayed = true;
+              setTimeout(() => playRandomFrom(lossSpeechBuffers), 1000);
+            }
           }
         } else {
           const hitPoint = new THREE.Vector3(
@@ -1041,9 +1241,14 @@ function animate() {
         enemyHealth = takeDamage(enemyRigidBody, enemyHealth, laserDamagePerTick, 'secondary', null, null);
         if (enemyHealth <= 0) {
           enemyDead = true;
+          playOnce(explodeBuffer);
           explosionPieces.push(...explodeTank(enemyMesh, enemyRigidBody));
           enemyMesh = null;
           enemyRigidBody = null;
+          if (!winSpeechPlayed) {
+            winSpeechPlayed = true;
+            setTimeout(() => playRandomFrom(winSpeechBuffers), 1000);
+          }
         }
       }
       if (hit && (enemyRigidBody == null || hit.collider.parent() !== enemyRigidBody) && (laserHoleCooldown -= dt) <= 0) {
@@ -1100,4 +1305,5 @@ function animate() {
   composer.render();
 }
 
-init();
+// Entry: splash.js calls init() when user selects a level (or on devmode)
+export { init };

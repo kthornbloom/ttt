@@ -3,13 +3,208 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Tank Game</title>
+  <title>Teeny Tiny Tanks</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Jersey+15&display=swap" rel="stylesheet">
   <style>
-    body { margin: 0; overflow: hidden; }
+    * { box-sizing: border-box; }
+    body { margin: 0; overflow: hidden; font-family: "Jersey 15", sans-serif; }
     canvas { display: block; }
+
+    #splash {
+      position: fixed;
+      inset: 0;
+      background: #FF5900;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+    }
+    #splash.hidden { display: none; }
+
+    #logo-container {
+      width: min(90vw, 320px);
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #logo-container.hidden { display: none; }
+
+    .ghosted { opacity: 0; }
+
+    #logo-svg {
+      width: min(90vw, 320px);
+      max-height: 70vh;
+    }
+    #logo-svg svg { width: 100%; height: auto; display: block; }
+
+    #splash-start {
+      padding-bottom: 3rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+      animation: hover 1s infinite;
+    }
+
+    @keyframes hover {
+      0% { transform: translateY(0); }
+      50% { transform: translateY(-10px); }
+      100% { transform: translateY(0); }
+    }
+
+    #splash-start.hidden { display: none; }
+
+    #level-select {
+      flex: 1;
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 1.5rem;
+      padding: 1rem 2rem 2rem;
+      overflow-y: auto;
+    }
+
+    #level-select:not(.hidden) { display: flex; }
+    #level-select.hidden { display: none; }
+
+    #level-select-logo {
+      width: 80px;
+      flex-shrink: 0;
+    }
+    #level-select-logo img { width: 100%; height: auto; display: block; }
+
+    .level-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 1rem;
+      max-width: 600px;
+    }
+    @media (max-width: 500px) {
+      .level-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    .level-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.5rem;
+      cursor: pointer;
+      background: black;
+      padding: 0.5rem;
+      border: 2px solid white;
+    }
+    .level-card:hover { opacity: 0.9; }
+    .level-card.locked {
+      cursor: not-allowed;
+      opacity: 0.5;
+      filter: grayscale(0.8);
+    }
+    .level-card.locked:hover { opacity: 0.5; }
+
+    .level-card-img {
+      width: 100%;
+      aspect-ratio: 1;
+      background: linear-gradient(135deg, #2a2a4a 0%, #1a1a3a 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: rgba(255,255,255,0.3);
+      font-size: 2rem;
+    }
+
+    .level-card-name {
+      color: white;
+      font-size: 1rem;
+    }
+
+    .splash-title {
+      color: white;
+      font-size: 1.5rem;
+      margin: 0;
+    }
+
+    button {
+      font-family: "Jersey 15", sans-serif;
+      font-size: 1.5rem;
+      background: black;
+      color: white;
+      border: none;
+      border-radius: 0;
+      padding: 0.75rem 2rem;
+      cursor: pointer;
+    }
+
+    button:hover { opacity: 0.9; }
+
+    #game-container {
+      display: none;
+    }
+
+    #game-container:not(.hidden) {
+      display: block;
+    }
   </style>
-  <script type="module" crossorigin src="/ttt/assets/index-COYyvmk5.js"></script>
+  <script type="module" crossorigin src="/ttt/assets/index-CdLGdPKt.js"></script>
 </head>
 <body>
+  <div id="splash">
+    <div id="logo-container">
+      <div id="logo-svg">
+        <svg width="508" height="801" viewBox="0 0 508 801" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path id="TANKS-Shadow" fill-rule="evenodd" clip-rule="evenodd" d="M491.249 414.259V422.634L499.407 420.751V429.124L507.568 427.24V554.686L499.407 556.57V564.943L491.249 566.827V575.202L89.7163 667.903V667.705L83.381 669.168V669.365L24.4791 682.964V582.474L0 588.125V527.673L491.249 414.259Z" fill="black"/>
+          <path id="TINY-Shadow" fill-rule="evenodd" clip-rule="evenodd" d="M507.743 263.837V349.411L495.912 352.142V360.517L484.08 363.249V371.622L472.247 374.354V382.729L460.416 385.46V435.705L390.497 451.847V451.651L353.94 460.091V460.287L272.19 479.161V478.964L259.286 481.943V482.14L130.093 511.966V511.77L105.415 517.468V517.664L35.496 533.806V433.316L0 441.51V381.058L507.743 263.837Z" fill="black"/>
+          <path id="TEENY-Shadow" fill-rule="evenodd" clip-rule="evenodd" d="M507.744 117.222V202.796L499.437 204.714V213.089L491.13 215.007V223.38L482.825 225.297V233.672L474.519 235.59V285.835L415.177 299.535V299.339L399.771 302.895V303.092L91.3272 374.302V374.105L84.2602 375.737V375.933L24.9178 389.633V289.143L0 294.896V234.444L507.744 117.222Z" fill="black"/>
+          <g id="TEENY">
+          <path id="outine" fill-rule="evenodd" clip-rule="evenodd" d="M507.744 117.222V202.796L499.437 204.714V213.089L491.13 215.007V223.38L482.825 225.297V233.672L474.519 235.59V285.835L415.177 299.535V299.339L399.771 302.895V303.092L91.3272 374.302V374.105L84.2602 375.737V375.933L24.9178 389.633V289.143L0 294.896V234.444L507.744 117.222ZM17.2113 273.258L42.1301 267.505V367.996L53.3553 365.404V239.79L17.2113 248.134V273.258ZM465.614 186.485L464.714 186.692V220.189L465.614 219.982V211.607L473.919 209.689V201.315L482.226 199.397V191.022L490.532 189.105V138.86L465.614 144.612V186.485Z" fill="black"/>
+          <g id="letters">
+          <path d="M67.0487 362.242L42.1299 367.995V267.505L17.2112 273.258V248.135L91.9665 230.876V255.999L67.0487 261.752V362.242Z" fill="white"/>
+          <path d="M183.294 234.914L133.457 246.42V271.543L174.988 261.955V287.077L133.457 296.665V321.788L183.294 310.283V335.405L108.538 352.663V227.05L183.294 209.791V234.914Z" fill="white"/>
+          <path d="M274.62 213.83L224.783 225.336V250.459L266.314 240.871V265.993L224.783 275.581V300.704L274.62 289.198V314.32L199.865 331.579V205.966L274.62 188.707V213.83Z" fill="white"/>
+          <path d="M324.417 193.96L332.722 192.042V208.79L341.028 206.873V223.622L349.335 221.704V238.452L357.641 236.534V169.54L382.559 163.787V289.401L349.335 297.071V280.323L341.028 282.241V265.493L332.722 267.41V250.661L324.417 252.579V235.831L316.111 237.748V304.741L291.192 310.494V184.881L324.417 177.211V193.96Z" fill="white"/>
+          <path d="M424.082 196.072L432.389 194.154V202.529L440.695 200.612V208.986L449.001 207.068V198.694L457.307 196.777V188.402L465.613 186.484V144.613L490.531 138.86V189.106L482.225 191.024V199.398L473.92 201.315V209.689L465.613 211.607V219.981L457.307 221.899V272.144L432.389 277.896V227.651L424.082 229.569V221.195L415.776 223.113V214.739L407.47 216.656V208.282L399.164 210.2V159.954L424.082 154.201V196.072Z" fill="white"/>
+          </g>
+          </g>
+          <g id="TINY">
+          <path id="outline" fill-rule="evenodd" clip-rule="evenodd" d="M507.743 263.837V349.411L495.912 352.142V360.517L484.08 363.249V371.622L472.247 374.354V382.729L460.416 385.46V435.705L390.497 451.847V451.651L353.94 460.091V460.287L272.19 479.161V478.964L259.286 481.943V482.14L130.093 511.966V511.77L105.415 517.468V517.664L35.496 533.806V433.316L0 441.51V381.058L507.743 263.837ZM459.551 359.621L466.868 357.932V349.558L478.699 346.826V338.451L490.531 335.72V285.474L459.551 292.627V359.621ZM17.2113 419.873L48.1923 412.72V387.596L17.2113 394.749V419.873Z" fill="black"/>
+          <g id="letters_2">
+          <path d="M253.906 356.852L265.738 354.121V370.869L277.57 368.137V384.886L289.402 382.155V398.903L301.233 396.171V329.177L336.729 320.982V446.596L289.402 457.523V440.774L277.57 443.505V426.757L265.738 429.489V412.74L253.906 415.472V398.724L242.075 401.455V468.449L206.579 476.644V351.03L253.906 340.103V356.852Z" fill="white"/>
+          <path d="M88.2022 503.972L52.7072 512.167V411.677L17.2112 419.872V394.749L123.698 370.164V395.287L88.2022 403.482V503.972Z" fill="white"/>
+          <path d="M182.799 482.133L147.304 490.328V364.714L182.799 356.52V482.133Z" fill="white"/>
+          <path d="M395.877 349.198L407.709 346.466V354.841L419.54 352.11V360.484L431.373 357.752V349.378L443.204 346.647V338.272L455.036 335.54V293.669L490.531 285.474V335.72L478.7 338.452V346.826L466.868 349.557V357.931L455.036 360.663V369.037L443.204 371.769V422.014L407.709 430.208V379.963L395.877 382.695V374.321L384.045 377.053V368.678L372.213 371.41V363.036L360.382 365.768V315.522L395.877 307.327V349.198Z" fill="white"/>
+          </g>
+          </g>
+          <g id="TANKS">
+          <path id="outline_2" fill-rule="evenodd" clip-rule="evenodd" d="M491.249 414.259V422.634L499.407 420.751V429.124L507.568 427.24V554.686L499.407 556.57V564.943L491.249 566.827V575.202L89.7163 667.903V667.705L83.381 669.168V669.365L24.4791 682.964V582.474L0 588.125V527.673L491.249 414.259ZM459.551 522.984L465.877 521.523V529.898L459.551 531.359V564.856L474.038 561.511V553.136L482.196 551.253V542.879L490.357 540.995V499.123L482.196 501.007V492.633L474.038 494.517V486.142L459.551 489.487V522.984ZM17.2113 566.488L41.6914 560.836V661.326L48.1923 659.825V534.211L17.2113 541.364V566.488ZM459.551 472.739L465.877 471.278V479.653L490.357 474.001V448.878L482.196 450.762V442.388L474.038 444.272V435.897L459.551 439.241V472.739Z" fill="black"/>
+          <g id="letters_3">
+          <path d="M335.364 518.158L351.683 514.39V506.015L359.843 504.131V462.26L384.321 456.609V506.855L376.162 508.739V517.113L368.002 518.997V527.371L376.162 525.487V533.861L384.321 531.977V582.223L359.843 587.875V546.003L351.683 547.886V539.512L335.364 543.28V593.526L310.885 599.177V473.563L335.364 467.912V518.158Z" fill="white"/>
+          <path d="M66.1695 655.673L41.6903 661.325V560.835L17.2112 566.486V541.363L90.6477 524.409V549.532L66.1695 555.183V655.673Z" fill="white"/>
+          <path fill-rule="evenodd" clip-rule="evenodd" d="M155.885 517.723L164.044 515.839V524.213L172.204 522.329V530.703L180.363 528.82V537.194L188.523 535.31V627.426L164.044 633.077V599.581L131.406 607.116V640.613L106.927 646.264V554.148L115.087 552.264V543.89L123.246 542.006V533.632L131.406 531.748V523.374L139.565 521.491V513.116L155.885 509.348V517.723ZM139.565 554.987L131.406 556.87V581.993L164.044 574.458V549.335L155.885 551.219V542.845L139.565 546.613V554.987Z" fill="white"/>
+          <path d="M237.457 507.264L245.616 505.381V522.129L253.776 520.245V536.994L261.935 535.11V551.858L270.095 549.974V482.98L294.574 477.329V602.942L261.935 610.477V593.729L253.776 595.613V578.865L245.616 580.749V564L237.457 565.884V549.136L229.297 551.019V618.013L204.818 623.664V498.051L237.457 490.515V507.264Z" fill="white"/>
+          <path d="M474.037 444.272L482.197 442.388V450.762L490.356 448.878V474L465.877 479.652V471.277L457.718 473.161V464.787L433.239 470.439V478.813L425.079 480.696V489.07L433.239 487.187V495.562L474.037 486.143V494.517L482.197 492.633V501.007L490.356 499.123V540.994L482.197 542.878V551.252L474.037 553.136V561.51L416.92 574.696V566.322L408.76 568.206V559.832L400.601 561.716V536.593L425.079 530.942V539.317L433.239 537.433V545.807L457.718 540.155V531.781L465.877 529.898V521.523L457.718 523.406V515.032L416.92 524.451V516.077L408.76 517.961V509.587L400.601 511.471V469.6L408.76 467.716V459.342L416.92 457.458V449.083L474.037 435.897V444.272Z" fill="white"/>
+          </g>
+          </g>
+          </svg>
+             
+      </div>
+    </div>
+    <div id="splash-start" class="ghosted">
+      <button id="start-btn">START</button>
+    </div>
+    <div id="level-select" class="hidden">
+      <div id="level-select-logo">
+        <img src="/ttt/assets/images/Logo.svg" alt="Teeny Tiny Tanks">
+      </div>
+      <div id="level-list" class="level-grid"></div>
+    </div>
+  </div>
+
+  <div id="game-container" class="hidden">
+    <!-- Game canvas appended by main.js -->
+  </div>
+
 </body>
 </html>
