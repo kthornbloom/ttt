@@ -1,4 +1,7 @@
 import * as THREE from 'three';
+
+// Resolve asset paths for both local dev (/) and GitHub Pages (/ttt/)
+const asset = (path) => import.meta.env.BASE_URL + path.replace(/^\//, '');
 import { EdgesGeometry } from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { Line2 } from 'three/addons/lines/Line2.js';
@@ -216,15 +219,15 @@ async function loadAudio(url) {
 }
 
 async function loadEngineSound() {
-  engineBuffer = await loadAudio('/assets/audio/engine.ogg');
+  engineBuffer = await loadAudio(asset('/assets/audio/engine.ogg'));
 }
 
 async function loadWeaponSounds() {
   [hissBuffer, laserBuffer, shootBuffer, reloadBuffer] = await Promise.all([
-    loadAudio('/assets/audio/hiss.mp3'),
-    loadAudio('/assets/audio/laser.mp3'),
-    loadAudio('/assets/audio/shot.wav'),
-    loadAudio('/assets/audio/reload.mp3')
+    loadAudio(asset('/assets/audio/hiss.mp3')),
+    loadAudio(asset('/assets/audio/laser.mp3')),
+    loadAudio(asset('/assets/audio/shot.wav')),
+    loadAudio(asset('/assets/audio/reload.mp3'))
   ]);
 }
 
@@ -388,7 +391,7 @@ async function init() {
   world = new RAPIER.World(new RAPIER.Vector3(0, -9.81, 0));
 
   // Load Level
-  const levelGlb = await loader.loadAsync('/assets/levels/level-01.glb');
+  const levelGlb = await loader.loadAsync(asset('/assets/levels/level-01.glb'));
   const level = levelGlb.scene;
   level.updateMatrixWorld(true);
   level.traverse((c) => {
@@ -404,7 +407,7 @@ async function init() {
   scene.add(level);
 
   // Load Tank
-  const tankGlb = await loader.loadAsync('/assets/characters/tank-01.glb');
+  const tankGlb = await loader.loadAsync(asset('/assets/characters/tank-01.glb'));
   tankMesh = tankGlb.scene;
   bodyGroup = tankMesh.getObjectByName('Body');
   barrelGroup = tankMesh.getObjectByName('Barrel');
@@ -445,7 +448,7 @@ async function init() {
 
   scene.add(tankMesh);
 
-  const enemyGlb = await loader.loadAsync('/assets/characters/tank-02.glb');
+  const enemyGlb = await loader.loadAsync(asset('/assets/characters/tank-02.glb'));
   const enemyData = createEnemyTank(enemyGlb.scene);
   enemyRigidBody = enemyData.rigidBody;
   enemyMesh = enemyData.mesh;
@@ -532,7 +535,7 @@ async function init() {
   scene.add(muzzleLight);
 
   const texLoader = new THREE.TextureLoader();
-  texLoader.load('/assets/images/bullet-hole.png', (tex) => {
+  texLoader.load(asset('/assets/images/bullet-hole.png'), (tex) => {
     bulletHoleTexture = tex;
     tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
   }, undefined, () => {
