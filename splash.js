@@ -27,11 +27,11 @@ function playTankSpeech(char) {
 
 async function loadGame(levelId = 'level-01', tankId = 'tank-01') {
   const { init } = await import('./main.js');
-  init(levelId, tankId);
+  await init(levelId, tankId);
 }
 
 function showTankSelect() {
-  document.getElementById('splash-start').classList.add('hidden');
+  document.getElementById('splash-start-intro').classList.add('hidden');
   document.getElementById('logo-container').classList.add('hidden');
   document.getElementById('tank-select').classList.remove('hidden');
   initTankSelect();
@@ -50,11 +50,13 @@ function showTankSelectFromLevel() {
   document.getElementById('tank-select').classList.remove('hidden');
 }
 
-function selectLevel(levelId) {
+async function selectLevel(levelId) {
   document.getElementById('splash').classList.add('hidden');
   document.getElementById('game-container').classList.remove('hidden');
+  document.getElementById('loading-overlay').classList.remove('hidden');
   destroyTankPreview();
-  loadGame(levelId, selectedTankId);
+  await loadGame(levelId, selectedTankId);
+  document.getElementById('loading-overlay').classList.add('hidden');
 }
 
 async function initTankSelect() {
@@ -173,15 +175,20 @@ async function runLogoAnimation() {
   }
 }
 
-async function initSplash() {
+async function onStartClick() {
   const startBtn = document.getElementById('start-btn');
-  const levelList = document.getElementById('level-list');
-
-  startBtn.addEventListener('click', showTankSelect);
-  startBtn.addEventListener('mouseenter', playQuickClick);
-
+  const introDiv = document.getElementById('splash-start-intro');
+  introDiv.classList.add('hidden');
+  document.getElementById('logo-container').classList.remove('hidden');
   await runLogoAnimation();
-  document.getElementById('splash-start').classList.remove('ghosted');
+  await new Promise((r) => setTimeout(r, 1000));
+  showTankSelect();
+}
+
+function initSplash() {
+  const startBtn = document.getElementById('start-btn');
+  startBtn.addEventListener('click', onStartClick);
+  startBtn.addEventListener('mouseenter', playQuickClick);
 }
 
 function buildLevelGrid() {
@@ -213,8 +220,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (devmode) {
     document.getElementById('splash').classList.add('hidden');
     document.getElementById('game-container').classList.remove('hidden');
-    loadGame();
+    document.getElementById('loading-overlay').classList.remove('hidden');
+    await loadGame();
+    document.getElementById('loading-overlay').classList.add('hidden');
     return;
   }
-  await initSplash();
+  initSplash();
 });

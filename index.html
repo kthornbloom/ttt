@@ -33,6 +33,17 @@
     }
     #logo-container.hidden { display: none; }
 
+    #splash-start-intro {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 2;
+      animation: hover 1s infinite;
+    }
+    #splash-start-intro.hidden { display: none; }
+
     .ghosted { opacity: 0; }
 
     #logo-svg {
@@ -41,22 +52,11 @@
     }
     #logo-svg svg { width: 100%; height: auto; display: block; }
 
-    #splash-start {
-      padding-bottom: 3rem;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 1rem;
-      animation: hover 1s infinite;
-    }
-
     @keyframes hover {
       0% { transform: translateY(0); }
       50% { transform: translateY(-10px); }
       100% { transform: translateY(0); }
     }
-
-    #splash-start.hidden { display: none; }
 
     #tank-select {
       flex: 1;
@@ -262,11 +262,27 @@
       z-index: 20;
     }
     .next-level-btn.hidden { display: none; }
+
+    #loading-overlay {
+      position: fixed;
+      inset: 0;
+      background: #261377;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 30;
+      color: white;
+      font-size: 1.5rem;
+    }
+    #loading-overlay.hidden { display: none; }
   </style>
 </head>
 <body>
   <div id="splash">
-    <div id="logo-container">
+    <div id="splash-start-intro">
+      <button id="start-btn">START</button>
+    </div>
+    <div id="logo-container" class="hidden">
       <div id="logo-svg">
         <svg width="508" height="801" viewBox="0 0 508 801" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path id="TANKS-Shadow" fill-rule="evenodd" clip-rule="evenodd" d="M491.249 414.259V422.634L499.407 420.751V429.124L507.568 427.24V554.686L499.407 556.57V564.943L491.249 566.827V575.202L89.7163 667.903V667.705L83.381 669.168V669.365L24.4791 682.964V582.474L0 588.125V527.673L491.249 414.259Z" fill="black"/>
@@ -305,9 +321,6 @@
              
       </div>
     </div>
-    <div id="splash-start" class="ghosted">
-      <button id="start-btn">START</button>
-    </div>
     <div id="tank-select" class="hidden">
       <h2 class="tank-name" id="tank-name">Scout</h2>
       <div class="tank-select-row">
@@ -330,6 +343,7 @@
   <div id="game-container" class="hidden">
     <!-- Game canvas appended by main.js -->
   </div>
+  <div id="loading-overlay" class="hidden">Loading...</div>
 
   <script type="module" src="/splash.js"></script>
 </body>
