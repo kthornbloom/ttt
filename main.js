@@ -37,6 +37,8 @@ const wheelSpeed = 4;
 const turnWheelFactor = 0.6;
 const recoilAmount = 0.5;
 const recoilSpeed = 1;
+const weaponSwitchDuration = 0.2;  // seconds per phase (retract or extend)
+const topMountedRetractOffset = 0.5;  // EMP/mortar sit this far below Blender position when hidden, then rise into place
 
 const cannonSpeed = 25;
 const cannonMaxDist = 80;
@@ -136,6 +138,30 @@ function findBarrelInList(weaponObjs, weaponType) {
   }) || null;
 }
 
+/** Top-mounted weapons (EMP, Mortar) extend upward; others retract/extend along barrel axis. */
+function isTopMountedWeapon(type) {
+  return type === 'emp' || type === 'mortar';
+}
+
+/** Blender position (extended). */
+function getTopMountedExtendedY(barrel) {
+  return barrelDefaults.get(barrel)?.y ?? 0;
+}
+
+/** Retracted position: slightly below Blender position. */
+function getTopMountedRetractedY(barrel) {
+  return getTopMountedExtendedY(barrel) - topMountedRetractOffset;
+}
+
+/** Get barrel object for a weapon mode (resolves type from character data). */
+function getBarrelForMode(mode) {
+  const w = getWeapon(mode);
+  if (!w) return fallbackBarrel;
+  const weaponObjs = collectAllWeaponBarrels(tankMesh);
+  const byType = weaponBarrels[w.type] || findBarrelInList(weaponObjs, w.type);
+  return byType || fallbackBarrel;
+}
+
 /** Show the barrel for the current weapon mode, hide others. Handles missing barrels gracefully. */
 function setActiveWeaponBarrel(mode) {
   const w = getWeapon(mode);
@@ -154,9 +180,49 @@ function setActiveWeaponBarrel(mode) {
     active.visible = true;
     barrelGroup = active;
     barrelDefaultZ = active.position.z;
+    // Reset scale/position in case we're coming out of an animation
+    active.scale.setScalar(1);
+    if (isTopMountedWeapon(w?.type)) active.position.y = getTopMountedExtendedY(active);
   } else {
     barrelGroup = null;
   }
+}
+
+/** Store default scale/position per barrel for animation. */
+const barrelDefaults = new WeakMap();
+
+/** Request weapon switch with barrel animation. Starts retract, then extend. */
+function requestWeaponSwitch(targetMode) {
+  if (targetMode === weaponMode) return;
+  const w2 = getWeapon(2);
+  if (targetMode === 2 && !w2) return;
+
+  const fromBarrel = getBarrelForMode(weaponMode);
+  const toBarrel = getBarrelForMode(targetMode);
+  const fromW = getWeapon(weaponMode);
+  const toW = getWeapon(targetMode);
+
+  if (!fromBarrel || !toBarrel) {
+    weaponMode = targetMode;
+    setActiveWeaponBarrel(targetMode);
+    return;
+  }
+
+  // Ensure defaults are stored
+  if (!barrelDefaults.has(fromBarrel)) {
+    barrelDefaults.set(fromBarrel, { scale: fromBarrel.scale.clone(), y: fromBarrel.position.y });
+  }
+  if (!barrelDefaults.has(toBarrel)) {
+    barrelDefaults.set(toBarrel, { scale: toBarrel.scale.clone(), y: toBarrel.position.y });
+  }
+
+  weaponSwitchTargetMode = targetMode;
+  weaponSwitchFromBarrel = fromBarrel;
+  weaponSwitchToBarrel = toBarrel;
+  weaponSwitchFromType = fromW?.type;
+  weaponSwitchToType = toW?.type;
+  weaponSwitchPhase = 'retracting';
+  weaponSwitchT = 0;
 }
 
 function isHeatBeamWeapon(w) {
@@ -231,6 +297,13 @@ let currentSpeed = 0, currentTurnSpeed = 0;
 let boostRemaining = boostDuration;
 let boostCooldown = 0;
 let weaponMode = 1;
+let weaponSwitchPhase = 'idle';
+let weaponSwitchT = 0;
+let weaponSwitchTargetMode = 1;
+let weaponSwitchFromBarrel = null;
+let weaponSwitchToBarrel = null;
+let weaponSwitchFromType = null;
+let weaponSwitchToType = null;
 let cannonAmmo = cannonAmmoMax;
 let cannonCooldown = 0;
 let weapon2Cooldown = 0;
@@ -268,6 +341,7 @@ let enemies = [];
 let turrets = [];
 let explosionPieces = [];
 let lastCamTarget = { x: 0, y: 2, z: 0 };
+let camZoomFactor = 1;
 let trajectoryBarrelTip = new THREE.Vector3(0, 0, 0);
 let impactFlashAge = -1;
 let playerKnockbackVel = { x: 0, y: 0, z: 0 };
@@ -315,6 +389,7 @@ let nextLevelIdForButton = null;
 let nextLevelBtnEl = null;
 let lossOverlayEl = null;
 let youWinOverlayEl = null;
+let escapePauseActive = false;
 let animateLoopStarted = false;
 let gameActive = false;
 
@@ -663,6 +738,8 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   boostRemaining = boostDuration;
   boostCooldown = 0;
   weaponMode = 1;
+  weaponSwitchPhase = 'idle';
+  weaponSwitchT = 0;
   fireCannonPending = false;
   fireMortarPending = false;
   fireEMPPending = false;
@@ -683,6 +760,8 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   if (nextLevelBtnEl) nextLevelBtnEl.classList.add('hidden');
   if (lossOverlayEl) lossOverlayEl.classList.add('hidden');
   if (youWinOverlayEl) youWinOverlayEl.classList.add('hidden');
+  escapePauseActive = false;
+  camZoomFactor = 1;
 
   // Cleanup previous level and game objects when re-initializing
   const lights = scene.children.filter((c) => c.isLight);
@@ -746,6 +825,9 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     const obj = findWeaponBarrel(tankMesh, type) || findBarrelInList(weaponObjs, type);
     if (obj) weaponBarrels[type] = obj;
   }
+  [fallbackBarrel, ...Object.values(weaponBarrels), ...weaponObjs].filter(Boolean).forEach((b) => {
+    if (!barrelDefaults.has(b)) barrelDefaults.set(b, { scale: b.scale.clone(), y: b.position.y });
+  });
   setActiveWeaponBarrel(1);
 
   tankMesh.traverse((c) => {
@@ -1027,8 +1109,29 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
       if (canFireMortar) fireMortarPending = true;
       if (canFireEMP) fireEMPPending = true;
     }
-    if (e.code === 'Digit1') { weaponMode = 1; setActiveWeaponBarrel(1); }
-    if (e.code === 'Digit2' && playerCharacter?.weapons?.[1]) { weaponMode = 2; setActiveWeaponBarrel(2); }
+    if (e.code === 'Digit1') requestWeaponSwitch(1);
+    if (e.code === 'Digit2' && playerCharacter?.weapons?.[1]) requestWeaponSwitch(2);
+    if (e.code === 'Minus' || e.code === 'NumpadSubtract') {
+      e.preventDefault();
+      camZoomFactor = Math.min(4, camZoomFactor * 2);
+    }
+    if (e.code === 'Equal' || e.code === 'NumpadAdd') {
+      e.preventDefault();
+      camZoomFactor = Math.max(0.25, camZoomFactor * 0.5);
+    }
+    if (e.code === 'Escape') {
+      e.preventDefault();
+      const gameVisible = !document.getElementById('game-container')?.classList.contains('hidden');
+      if (gameVisible && lossOverlayEl) {
+        if (escapePauseActive) {
+          escapePauseActive = false;
+          lossOverlayEl.classList.add('hidden');
+        } else if (!playerDead) {
+          escapePauseActive = true;
+          lossOverlayEl.classList.remove('hidden');
+        }
+      }
+    }
   });
   document.addEventListener('keyup', (e) => (keys[e.code] = false));
 
@@ -1554,12 +1657,71 @@ function animate() {
     [wheelFR, wheelBR].forEach((w) => { if (w) w.rotation.x = wheelRotR; });
   }
 
+  // Weapon switch barrel animation
+  if (weaponSwitchPhase !== 'idle' && tankMesh) {
+    weaponSwitchT = Math.min(1, weaponSwitchT + dt / weaponSwitchDuration);
+    const t = weaponSwitchT;
+    const ease = (x) => x * x * (3 - 2 * x); // smoothstep
+
+    if (weaponSwitchPhase === 'retracting') {
+      const from = weaponSwitchFromBarrel;
+      const def = barrelDefaults.get(from);
+      if (from && def) {
+        if (isTopMountedWeapon(weaponSwitchFromType)) {
+          const extY = getTopMountedExtendedY(from);
+          from.position.y = extY - topMountedRetractOffset * ease(t);
+        } else {
+          const s = 1 - ease(t);
+          from.scale.setScalar(s);
+        }
+      }
+      if (t >= 1) {
+        from.visible = false;
+        const to = weaponSwitchToBarrel;
+        to.visible = true;
+        if (isTopMountedWeapon(weaponSwitchToType)) {
+          to.position.y = getTopMountedRetractedY(to);
+        } else {
+          to.scale.setScalar(0);
+        }
+        weaponSwitchPhase = 'extending';
+        weaponSwitchT = 0;
+        barrelGroup = to;
+        barrelDefaultZ = to.position.z;
+      }
+    } else if (weaponSwitchPhase === 'extending') {
+      const to = weaponSwitchToBarrel;
+      const def = barrelDefaults.get(to);
+      if (to && def) {
+        if (isTopMountedWeapon(weaponSwitchToType)) {
+          const retY = getTopMountedRetractedY(to);
+          to.position.y = retY + topMountedRetractOffset * ease(t);
+        } else {
+          to.scale.setScalar(ease(t));
+        }
+      }
+      if (t >= 1) {
+        if (to) {
+          to.scale.setScalar(1);
+          if (isTopMountedWeapon(weaponSwitchToType)) to.position.y = getTopMountedExtendedY(to);
+        }
+        weaponMode = weaponSwitchTargetMode;
+        weaponSwitchPhase = 'idle';
+      }
+    }
+  }
+
   const heatBeamW = getWeapon(weaponMode);
   const heatBeamActive = heatBeamW && isHeatBeamWeapon(heatBeamW) && keys['Space'] && mgHeat < (heatBeamW.heatMax ?? 1) && !mgOverheated;
-  if (barrelGroup && !playerDead && tankMesh) {
+  if (barrelGroup && !playerDead && tankMesh && weaponSwitchPhase === 'idle') {
     if (!heatBeamActive) {
       barrelRecoil = Math.max(0, barrelRecoil - recoilSpeed * dt);
-      barrelGroup.position.z = (barrelDefaultZ ?? 0) + recoilAmount * barrelRecoil;
+      const currentW = getWeapon(weaponMode);
+      if (isTopMountedWeapon(currentW?.type)) {
+        barrelGroup.position.y = getTopMountedExtendedY(barrelGroup) - recoilAmount * barrelRecoil;
+      } else {
+        barrelGroup.position.z = (barrelDefaultZ ?? 0) + recoilAmount * barrelRecoil;
+      }
     }
   }
 
@@ -1568,7 +1730,11 @@ function animate() {
   const heatBeamWeaponSelected = heatBeamW && isHeatBeamWeapon(heatBeamW);
   const cannonBarrel = weaponBarrels['cannon'];
   const barrelForTip = heatBeamWeaponSelected ? (cannonBarrel || fallbackBarrel || bodyGroup || barrelGroup) : barrelGroup;
-  const barrelTip = barrelForTip && tankMesh ? new THREE.Vector3(0, 0, -0.5).applyMatrix4(barrelForTip.matrixWorld) : new THREE.Vector3(posFinal.x, posFinal.y, posFinal.z);
+  let barrelTip = barrelForTip && tankMesh ? new THREE.Vector3(0, 0, -0.5).applyMatrix4(barrelForTip.matrixWorld) : new THREE.Vector3(posFinal.x, posFinal.y, posFinal.z);
+  // Minigun-only tanks (e.g. tank-03) have no cannon barrel; fallback may be at floor — clamp to tank height
+  if (heatBeamWeaponSelected && !cannonBarrel && barrelTip.y < posFinal.y + 0.5) {
+    barrelTip = new THREE.Vector3(barrelTip.x, posFinal.y + 1.0, barrelTip.z);
+  }
   const fireForward = (barrelGroup || barrelForTip) && tankMesh
     ? new THREE.Vector3(0, 0, -1).clone().transformDirection((barrelGroup || barrelForTip).matrixWorld)
     : new THREE.Vector3(0, 0, -1);
@@ -2152,7 +2318,7 @@ function animate() {
     else if (nextLevelBtnEl) nextLevelBtnEl.classList.add('hidden');
     if (youWinOverlayEl && enemyDead && !playerDead && !nextLevelIdForButton) youWinOverlayEl.classList.remove('hidden');
     else if (youWinOverlayEl) youWinOverlayEl.classList.add('hidden');
-    if (lossOverlayEl && playerDead) lossOverlayEl.classList.remove('hidden');
+    if (lossOverlayEl && (playerDead || escapePauseActive)) lossOverlayEl.classList.remove('hidden');
     else if (lossOverlayEl) lossOverlayEl.classList.add('hidden');
   } else {
     if (lossOverlayEl) lossOverlayEl.classList.add('hidden');
@@ -2168,8 +2334,12 @@ function animate() {
     if (alive) lastCamTarget = alive.rigidBody.translation();
   }
   const camTarget = lastCamTarget;
+  const zoomH = camHeight * camZoomFactor;
+  const zoomD = camDist * camZoomFactor;
+  scene.fog.near = 20 * camZoomFactor;
+  scene.fog.far = 100 * camZoomFactor;
   camera.position.lerp(
-    new THREE.Vector3(camTarget.x, camTarget.y + camHeight, camTarget.z + camDist),
+    new THREE.Vector3(camTarget.x, camTarget.y + zoomH, camTarget.z + zoomD),
     0.08
   );
   camera.lookAt(camTarget.x, camTarget.y, camTarget.z);

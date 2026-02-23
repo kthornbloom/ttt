@@ -13,10 +13,43 @@ let previewWeaponIndex = 0;
 let previewCharacter = null;
 let dropAnimationProgress = 1;
 let dropImpactPlayed = false;
+let weaponSwitchPhase = 'idle';
+let weaponSwitchT = 0;
+let weaponSwitchTargetIndex = 0;
+let weaponSwitchFromBarrel = null;
+let weaponSwitchToBarrel = null;
+let weaponSwitchFromType = null;
+let weaponSwitchToType = null;
 
 const DROP_START_Y = 4;
 const DROP_END_Y = 0;
 const DROP_DURATION_MS = 450;
+const WEAPON_SWITCH_DURATION = 0.2;
+const TOP_MOUNTED_RETRACT_OFFSET = 0.5;
+
+const barrelDefaults = new WeakMap();
+
+function isTopMountedWeapon(type) {
+  return type === 'emp' || type === 'mortar';
+}
+
+function getTopMountedExtendedY(barrel) {
+  return barrelDefaults.get(barrel)?.y ?? 0;
+}
+
+function getTopMountedRetractedY(barrel) {
+  return getTopMountedExtendedY(barrel) - TOP_MOUNTED_RETRACT_OFFSET;
+}
+
+function getBarrelForWeaponIndex(weaponIndex) {
+  if (!tankMesh || !previewCharacter) return null;
+  const w = previewCharacter.weapons?.[weaponIndex];
+  const weaponType = w?.type;
+  const weaponObjs = collectAllWeaponBarrels(tankMesh);
+  const fallbackBarrel = tankMesh.getObjectByName('Barrel');
+  const barrel = weaponType ? (findWeaponBarrel(tankMesh, weaponType) || findBarrelInList(weaponObjs, weaponType)) : null;
+  return barrel || fallbackBarrel;
+}
 
 function easeOutBounce(t) {
   const n1 = 7.5625, d1 = 2.75;
@@ -67,7 +100,7 @@ export async function initTankPreview(canvas, character) {
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0xff5900);
   camera = new THREE.PerspectiveCamera(50, canvas.clientWidth / canvas.clientHeight, 0.1, 100);
-  camera.position.set(0, 2.5, 11);
+  camera.position.set(0, 10, 11);
   camera.lookAt(0, 1.2, 0);
 
   // Ground plane for real shadows (receives shadows only)
@@ -147,15 +180,23 @@ async function loadTank(character) {
   const weaponObjs = collectAllWeaponBarrels(tankMesh);
   const fallbackBarrel = tankMesh.getObjectByName('Barrel');
   const allBarrels = [...new Set([...weaponObjs, fallbackBarrel])].filter(Boolean);
-  allBarrels.forEach((b) => { b.visible = false; });
+  allBarrels.forEach((b) => {
+    b.visible = false;
+    if (!barrelDefaults.has(b)) barrelDefaults.set(b, { scale: b.scale.clone(), y: b.position.y });
+  });
 
   previewWeaponIndex = 0;
+  weaponSwitchPhase = 'idle';
   previewCharacter = character;
   const primaryWeapon = character?.weapons?.[0];
   const primaryType = primaryWeapon?.type;
   const primaryBarrel = primaryType ? (findWeaponBarrel(tankMesh, primaryType) || findBarrelInList(weaponObjs, primaryType)) : null;
   const toShow = primaryBarrel || fallbackBarrel;
-  if (toShow) toShow.visible = true;
+  if (toShow) {
+    toShow.visible = true;
+    toShow.scale.setScalar(1);
+    if (isTopMountedWeapon(primaryType)) toShow.position.y = getTopMountedExtendedY(toShow);
+  }
 
   tankMesh.scale.setScalar(1.4);
   tankMesh.rotation.y = Math.PI;
@@ -170,18 +211,41 @@ export async function setTankCharacter(character) {
   if (character && scene) await loadTank(character);
 }
 
+function requestWeaponSwitch(targetIndex) {
+  if (targetIndex === previewWeaponIndex && weaponSwitchPhase === 'idle') return;
+  if (targetIndex === weaponSwitchTargetIndex) return;  // already animating to this weapon
+  const w2 = previewCharacter?.weapons?.[targetIndex];
+  if (targetIndex >= 1 && !w2) return;
+
+  const currentIndex = weaponSwitchPhase === 'idle' ? previewWeaponIndex : weaponSwitchTargetIndex;
+  const fromBarrel = getBarrelForWeaponIndex(currentIndex);
+  const toBarrel = getBarrelForWeaponIndex(targetIndex);
+  const fromW = previewCharacter?.weapons?.[currentIndex];
+  const toW = previewCharacter?.weapons?.[targetIndex];
+
+  if (!fromBarrel || !toBarrel) {
+    previewWeaponIndex = targetIndex;
+    const allBarrels = [...new Set([...collectAllWeaponBarrels(tankMesh), tankMesh.getObjectByName('Barrel')])].filter(Boolean);
+    allBarrels.forEach((b) => { b.visible = false; });
+    if (toBarrel) toBarrel.visible = true;
+    return;
+  }
+
+  if (!barrelDefaults.has(fromBarrel)) barrelDefaults.set(fromBarrel, { scale: fromBarrel.scale.clone(), y: fromBarrel.position.y });
+  if (!barrelDefaults.has(toBarrel)) barrelDefaults.set(toBarrel, { scale: toBarrel.scale.clone(), y: toBarrel.position.y });
+
+  weaponSwitchTargetIndex = targetIndex;
+  weaponSwitchFromBarrel = fromBarrel;
+  weaponSwitchToBarrel = toBarrel;
+  weaponSwitchFromType = fromW?.type;
+  weaponSwitchToType = toW?.type;
+  weaponSwitchPhase = 'retracting';
+  weaponSwitchT = 0;
+}
+
 export function setTankPreviewWeapon(weaponIndex) {
   if (!tankMesh || !previewCharacter) return;
-  const w = previewCharacter.weapons?.[weaponIndex];
-  const weaponType = w?.type;
-  const weaponObjs = collectAllWeaponBarrels(tankMesh);
-  const fallbackBarrel = tankMesh.getObjectByName('Barrel');
-  const allBarrels = [...new Set([...weaponObjs, fallbackBarrel])].filter(Boolean);
-  allBarrels.forEach((b) => { b.visible = false; });
-  const barrel = weaponType ? (findWeaponBarrel(tankMesh, weaponType) || findBarrelInList(weaponObjs, weaponType)) : null;
-  const toShow = barrel || fallbackBarrel;
-  if (toShow) toShow.visible = true;
-  previewWeaponIndex = weaponIndex;
+  requestWeaponSwitch(weaponIndex);
 }
 
 export function destroyTankPreview() {
@@ -225,6 +289,57 @@ function animate() {
       if (!dropImpactPlayed && prevEased < 1 && eased >= 1) {
         dropImpactPlayed = true;
         playClank();
+      }
+    }
+
+    // Weapon switch barrel animation
+    if (weaponSwitchPhase !== 'idle') {
+      weaponSwitchT = Math.min(1, weaponSwitchT + dt / WEAPON_SWITCH_DURATION);
+      const t = weaponSwitchT;
+      const ease = (x) => x * x * (3 - 2 * x);
+
+      if (weaponSwitchPhase === 'retracting') {
+        const from = weaponSwitchFromBarrel;
+        const def = barrelDefaults.get(from);
+        if (from && def) {
+          if (isTopMountedWeapon(weaponSwitchFromType)) {
+            const extY = getTopMountedExtendedY(from);
+            from.position.y = extY - TOP_MOUNTED_RETRACT_OFFSET * ease(t);
+          } else {
+            from.scale.setScalar(1 - ease(t));
+          }
+        }
+        if (t >= 1) {
+          from.visible = false;
+          const to = weaponSwitchToBarrel;
+          to.visible = true;
+          if (isTopMountedWeapon(weaponSwitchToType)) {
+            to.position.y = getTopMountedRetractedY(to);
+          } else {
+            to.scale.setScalar(0);
+          }
+          weaponSwitchPhase = 'extending';
+          weaponSwitchT = 0;
+        }
+      } else if (weaponSwitchPhase === 'extending') {
+        const to = weaponSwitchToBarrel;
+        const def = barrelDefaults.get(to);
+        if (to && def) {
+          if (isTopMountedWeapon(weaponSwitchToType)) {
+            const retY = getTopMountedRetractedY(to);
+            to.position.y = retY + TOP_MOUNTED_RETRACT_OFFSET * ease(t);
+          } else {
+            to.scale.setScalar(ease(t));
+          }
+        }
+        if (t >= 1) {
+          if (to) {
+            to.scale.setScalar(1);
+            if (isTopMountedWeapon(weaponSwitchToType)) to.position.y = getTopMountedExtendedY(to);
+          }
+          previewWeaponIndex = weaponSwitchTargetIndex;
+          weaponSwitchPhase = 'idle';
+        }
       }
     }
   }
