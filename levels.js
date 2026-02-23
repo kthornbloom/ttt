@@ -60,6 +60,14 @@ async function getLevelById(id) {
 }
 
 /**
+ * Returns true if all levels have been defeated.
+ */
+async function areAllLevelsDefeated() {
+  const levels = await getLevels();
+  return levels.length > 0 && levels.every((l) => l.defeated);
+}
+
+/**
  * Returns the next level id in order, or null if none.
  */
 async function getNextLevelId(currentLevelId) {
@@ -80,4 +88,4 @@ async function getLevelGlbPath(levelId) {
   return level ? asset(level.glbPath) : asset(`/assets/levels/${levelId}.glb`);
 }
 
-export { fetchLevels, getLevels, getLevelById, getNextLevelId, getLevelGlbPath, markDefeated };
+export { fetchLevels, getLevels, getLevelById, getNextLevelId, getLevelGlbPath, markDefeated, areAllLevelsDefeated };

@@ -244,6 +244,7 @@ let playerAccelRate = 1;
 let nextLevelIdForButton = null;
 let nextLevelBtnEl = null;
 let lossOverlayEl = null;
+let youWinOverlayEl = null;
 let animateLoopStarted = false;
 
 async function loadAudio(url) {
@@ -267,7 +268,7 @@ async function loadWeaponSounds() {
     loadAudio(asset('/assets/audio/hiss.mp3')),
     loadAudio(asset('/assets/audio/laser.mp3')),
     loadAudio(asset('/assets/audio/minigun.mp3')),
-    loadAudio(asset('/assets/audio/shot.wav')),
+    loadAudio(asset('/assets/audio/shot.mp3')),
     loadAudio(asset('/assets/audio/reload.mp3'))
   ]);
 }
@@ -282,7 +283,10 @@ async function loadGameSounds() {
     ...winFiles.map((f) => loadAudio(asset(`/assets/audio/speech/win/${f}`))),
     ...lossFiles.map((f) => loadAudio(asset(`/assets/audio/speech/loss/${f}`)))
   ]);
-  [explodeBuffer, repairBuffer, thudBuffer, ...winSpeechBuffers] = results;
+  explodeBuffer = results[0];
+  repairBuffer = results[1];
+  thudBuffer = results[2];
+  winSpeechBuffers = results.slice(3, 6);
   lossSpeechBuffers = results.slice(6, 9);
 }
 
@@ -546,6 +550,7 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   Object.keys(keys).forEach((k) => (keys[k] = false));
   if (nextLevelBtnEl) nextLevelBtnEl.classList.add('hidden');
   if (lossOverlayEl) lossOverlayEl.classList.add('hidden');
+  if (youWinOverlayEl) youWinOverlayEl.classList.add('hidden');
 
   // Cleanup previous level and game objects when re-initializing
   const lights = scene.children.filter((c) => c.isLight);
@@ -756,6 +761,33 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
 
   hudEl = document.createElement('div');
   hudEl.classList.add('hud');
+  hudEl.innerHTML = `
+    <div class="hud-left">
+      <div class="hud-data" id="hud-weapon1">
+        <div class="hud-data-icon">◆</div>
+        <div class="hud-data-name">Weapon 1</div>
+        <div class="hud-data-detail">—</div>
+      </div>
+      <div class="hud-data" id="hud-weapon2">
+        <div class="hud-data-icon">◆</div>
+        <div class="hud-data-name">Weapon 2</div>
+        <div class="hud-data-detail">—</div>
+      </div>
+    </div>
+    <div class="hud-center"></div>
+    <div class="hud-right">
+      <div class="hud-data" id="hud-health">
+        <div class="hud-data-icon">♥</div>
+        <div class="hud-data-name">Health</div>
+        <div class="hud-data-detail">100%</div>
+      </div>
+      <div class="hud-data" id="hud-angle">
+        <div class="hud-data-icon">∠</div>
+        <div class="hud-data-name">Angle</div>
+        <div class="hud-data-detail">0°</div>
+      </div>
+    </div>
+  `;
   document.body.appendChild(hudEl);
 
   if (!nextLevelBtnEl) {
@@ -787,6 +819,20 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     });
     lossOverlayEl.append(retryBtn, menuBtn);
     document.body.appendChild(lossOverlayEl);
+  }
+
+  if (!youWinOverlayEl) {
+    youWinOverlayEl = document.createElement('div');
+    youWinOverlayEl.classList.add('you-win-overlay', 'hidden');
+    youWinOverlayEl.innerHTML = '<div class="you-win-text">YOU WIN</div>';
+    const menuBtn = document.createElement('button');
+    menuBtn.textContent = 'Main Menu';
+    menuBtn.addEventListener('click', () => {
+      youWinOverlayEl.classList.add('hidden');
+      goToMainMenu();
+    });
+    youWinOverlayEl.appendChild(menuBtn);
+    document.body.appendChild(youWinOverlayEl);
   }
 
   window.addEventListener('resize', () => {
@@ -1687,19 +1733,52 @@ function animate() {
     if (mgHeat <= 0) mgOverheated = false;
   }
 
-  const currentWeapon = getWeapon(weaponMode);
-  const weaponName = currentWeapon?.name ?? (weaponMode === 1 ? 'Cannon' : 'Laser');
-  const cannonCooldownStr = cannonCooldown > 0 ? ` | Cooldown: ${cannonCooldown.toFixed(1)}s` : '';
-  const weapon2CooldownStr = weapon2Cooldown > 0 && weaponMode === 2 ? ` | Cooldown: ${weapon2Cooldown.toFixed(1)}s` : '';
-  const heatStr = (heatBeamW && isHeatBeamWeapon(heatBeamW)) ? ` | Heat: ${(Math.min(1, mgHeat / (heatBeamW?.heatMax ?? 1)) * 100).toFixed(0)}%` : '';
-  const healthStr = ` | HP: ${playerHealth}/${playerHealthMaxDynamic}`;
-  const totalEnemyHealth = enemies.reduce((s, e) => s + e.health, 0);
-  const totalEnemyMax = enemies.length * enemyHealthMax;
-  const enemyHealthStr = enemies.length > 0 ? ` | Enemies: ${totalEnemyHealth}/${totalEnemyMax}` : (enemyDead ? ' | Enemies: Defeated' : '');
-  hudEl.textContent = `Weapon: ${weaponName} | Ammo: ${cannonAmmo}/${cannonAmmoMax}${cannonCooldownStr}${weapon2CooldownStr}${heatStr}${healthStr}${enemyHealthStr}`;
+  const hudHeatBeamW = getWeapon(weaponMode);
+  const hudIsHeatBeam = hudHeatBeamW && isHeatBeamWeapon(hudHeatBeamW);
+  const heatPct = hudIsHeatBeam ? (Math.min(1, mgHeat / (hudHeatBeamW?.heatMax ?? 1)) * 100).toFixed(0) : 0;
 
-  if (nextLevelBtnEl && enemyDead && !playerDead && nextLevelIdForButton) nextLevelBtnEl.classList.remove('hidden');
-  if (lossOverlayEl && playerDead) lossOverlayEl.classList.remove('hidden');
+  const w1El = hudEl.querySelector('#hud-weapon1');
+  const w2El = hudEl.querySelector('#hud-weapon2');
+  const healthEl = hudEl.querySelector('#hud-health .hud-data-detail');
+  const angleEl = hudEl.querySelector('#hud-angle .hud-data-detail');
+
+  const detailForWeapon = (w) => {
+    if (!w) return '—';
+    if (w.type === 'cannon' || w.type === 'mortar') {
+      const cd = w.type === 'cannon' ? cannonCooldown : weapon2Cooldown;
+      return `Ammo: ${cannonAmmo}${cd > 0 ? ` (${cd.toFixed(1)}s)` : ''}`;
+    }
+    if (isHeatBeamWeapon(w)) return `Heat: ${heatPct}%`;
+    if (w.type === 'emp') return `Cooldown: ${weapon2Cooldown > 0 ? weapon2Cooldown.toFixed(1) + 's' : 'Ready'}`;
+    return '—';
+  };
+  if (w1El) {
+    w1El.classList.toggle('hud-data-deactive', weaponMode !== 1);
+    w1El.querySelector('.hud-data-name').textContent = w1?.name ?? '—';
+    w1El.querySelector('.hud-data-detail').textContent = detailForWeapon(w1);
+  }
+  if (w2El) {
+    w2El.style.display = w2 ? '' : 'none';
+    w2El.classList.toggle('hud-data-deactive', weaponMode !== 2);
+    w2El.querySelector('.hud-data-name').textContent = w2?.name ?? '—';
+    w2El.querySelector('.hud-data-detail').textContent = detailForWeapon(w2);
+  }
+  if (healthEl) healthEl.textContent = `${Math.round((playerHealth / playerHealthMaxDynamic) * 100)}%`;
+  if (angleEl) angleEl.textContent = `${bodyAimPitch >= 0 ? '+' : ''}${Math.round(bodyAimPitch * (180 / Math.PI))}°`;
+
+  const gameVisible = !document.getElementById('game-container')?.classList.contains('hidden');
+  if (gameVisible) {
+    if (nextLevelBtnEl && enemyDead && !playerDead && nextLevelIdForButton) nextLevelBtnEl.classList.remove('hidden');
+    else if (nextLevelBtnEl) nextLevelBtnEl.classList.add('hidden');
+    if (youWinOverlayEl && enemyDead && !playerDead && !nextLevelIdForButton) youWinOverlayEl.classList.remove('hidden');
+    else if (youWinOverlayEl) youWinOverlayEl.classList.add('hidden');
+    if (lossOverlayEl && playerDead) lossOverlayEl.classList.remove('hidden');
+    else if (lossOverlayEl) lossOverlayEl.classList.add('hidden');
+  } else {
+    if (lossOverlayEl) lossOverlayEl.classList.add('hidden');
+    if (nextLevelBtnEl) nextLevelBtnEl.classList.add('hidden');
+    if (youWinOverlayEl) youWinOverlayEl.classList.add('hidden');
+  }
 
   if (tankRigidBody) lastCamTarget = tankRigidBody.translation();
   else if (enemies.length > 0) {

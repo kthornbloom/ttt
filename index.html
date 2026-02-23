@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Teeny Tiny Tanks</title>
+  <link rel="icon" href="/assets/images/favicon.svg" type="image/x-icon">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Jersey+15&display=swap" rel="stylesheet">
@@ -277,16 +278,6 @@
       display: block;
     }
 
-    .hud {
-      position: fixed;
-      bottom: 0;
-      left: 0;
-      right: 0;
-      padding: 8px;
-      background: rgba(0,0,0,0.5);
-      color: white;
-    }
-
     .next-level-btn {
       position: fixed;
       top: 50%;
@@ -309,6 +300,25 @@
     }
     .loss-overlay.hidden { display: none; }
 
+    .you-win-overlay {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 20;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1.5rem;
+    }
+    .you-win-overlay.hidden { display: none; }
+    .you-win-text {
+      font-family: "Jersey 15", sans-serif;
+      font-size: clamp(4rem, 15vw, 8rem);
+      color: white;
+      text-shadow: 4px 4px 0 rgba(0,0,0,0.5);
+    }
+
     #loading-overlay {
       position: fixed;
       inset: 0;
@@ -321,6 +331,82 @@
       font-size: 1.5rem;
     }
     #loading-overlay.hidden { display: none; }
+
+    .hud {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      width: 100vw;
+      max-width: 100%;
+      display: flex;
+      overflow: hidden;
+    }
+
+.hud-left {
+  display: flex;
+  gap: 10px;
+  justify-content: space-around;
+  position: relative;
+  color: #fff;
+  width: 250px;
+  padding: 2.5em 1em 1.5em 1em;
+  &::before {
+    content:'';
+    width: 120%;
+    height: 120%;
+    background: #000;
+    transform-origin: top left;
+    transform: rotate(5deg) translate(-5%, 5%);
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: -1;
+  }
+}
+
+.hud-data {
+  text-align: center;
+  opacity: 1;
+  transform: scale(1);
+}
+
+.hud-data-deactive {
+  opacity: .5;
+  transform: scale(.7);
+}
+
+.hud-data-name {
+  color: orange;
+  font-size: 2rem;
+}
+
+.hud-center {
+  flex-grow: 1;
+}
+
+
+.hud-right {
+  display: flex;
+  gap: 10px;
+  justify-content: space-around;
+  position: relative;
+  color: #fff;
+  width: 250px;
+  padding: 2.5em 1em 1.5em 1em;
+  &::before {
+    content:'';
+    width: 120%;
+    height: 120%;
+    background: #000;
+    transform-origin: top right;
+    transform: rotate(-5deg) translate(-5%, 5%);
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: -1;
+  }
+}
+
   </style>
 </head>
 <body>
