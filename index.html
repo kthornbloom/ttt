@@ -198,13 +198,8 @@
       margin-top: 1rem;
     }
 
-    /* Mobile vertical: smaller CHOOSE banner so it doesn't overlap tank name */
-    @media (orientation: portrait) and (max-width: 600px) {
-      .corner {
-        font-size: clamp(1.8rem, 5vw, 3rem);
-        padding: 2em 1.8em 0.3em 1.8em;
-      }
-      .tank-select-right {
+    
+    .tank-select-right {
         display: flex;
         flex-direction: column;
         align-items: center;
@@ -212,6 +207,13 @@
         gap: 0.5rem;
         flex: 1;
         min-width: 0;
+      }
+
+    /* Mobile vertical: smaller CHOOSE banner so it doesn't overlap tank name */
+    @media (orientation: portrait) and (max-width: 600px) {
+      .corner {
+        font-size: clamp(1.8rem, 5vw, 3rem);
+        padding: 2em 1.8em 0.3em 1.8em;
       }
       #tank-preview-canvas {
         width: 60vw;
@@ -345,6 +347,7 @@
       background: black;
       padding: 0.5rem;
       position: relative;
+      width: calc(33% - 10px);
     }
 
     .level-card:hover::after {
@@ -378,16 +381,18 @@
       justify-content: center;
       color: rgba(255,255,255,0.3);
       font-size: 2rem;
-      width: 300px;
       aspect-ratio: 3/2;
+    }
+
+    @media (orientation: portrait) and (max-width: 600px) {
+      .level-card {
+        width: calc(50% - 10px);
+      }
     }
 
     @media (orientation: landscape) and (max-height: 600px) {
       .level-card {
         width: calc(33% - 10px);
-      }
-      .level-card-img {
-        width: 100%;
       }
     }
 
@@ -901,6 +906,67 @@
       gap: 0.75rem;
       justify-content: flex-end;
     }
+
+    .volume-controls {
+      position: absolute;
+      top: 1rem;
+      right: 1rem;
+      display: flex;
+      flex-direction: row;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem 1rem;
+      padding: 0.4rem 0.6rem;
+      border-radius: 0.5rem;
+      font-family: "Jersey 15", sans-serif;
+    }
+    .volume-controls label {
+      color: white;
+      font-size: 0.9rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+    .volume-controls input[type="range"] {
+      width: 56px;
+      height: 6px;
+      -webkit-appearance: none;
+      appearance: none;
+      background: transparent;
+      border-radius: 0;
+    }
+    .volume-controls input[type="range"]::-webkit-slider-runnable-track {
+      width: 100%;
+      height: 6px;
+      background: linear-gradient(to right, #000 0%, #000 var(--fill, 0%), #FF5900 var(--fill, 0%), #FF5900 100%);
+    }
+    .volume-controls input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 10px;
+      height: 10px;
+      background: #000;
+      border: none;
+      border-radius: 0;
+      cursor: pointer;
+    }
+    .volume-controls input[type="range"]::-moz-range-thumb {
+      width: 10px;
+      height: 10px;
+      background: #000;
+      border: none;
+      border-radius: 0;
+      cursor: pointer;
+    }
+    .volume-controls input[type="range"]::-moz-range-track {
+      background: #FF5900;
+    }
+    .volume-controls input[type="range"]::-moz-range-progress {
+      background: #000;
+    }
+    .volume-controls.hidden { display: none; }
+    @media (orientation: portrait) and (max-width: 600px), (orientation: landscape) and (max-height: 600px) {
+      .volume-controls { display: none !important; }
+    }
   </style>
 </head>
 <body>
@@ -946,6 +1012,10 @@
           </svg>
              
       </div>
+    </div>
+    <div id="volume-controls" class="volume-controls hidden">
+      <label>SFX <input type="range" id="volume-sfx" min="0" max="100"></label>
+      <label>Music <input type="range" id="volume-music" min="0" max="100"></label>
     </div>
     <div id="tank-select" class="hidden">
       <div class="corner">CHOOSE</div>

@@ -2,8 +2,9 @@ import * as THREE from 'three';
 import { getLevelGlbPath, getNextLevelId, markDefeated } from './levels.js';
 import { getCharacterGlbPath, getCharacterById } from './characters.js';
 import { isTouchMode } from './input-mode.js';
-import { loadKeybindings, getActionForKey, isKeyForAction } from './keybindings.js';
+import { loadKeybindings, getActionForKey, getKeyForAction, isKeyForAction } from './keybindings.js';
 import { showControlsIfFirstLevel01, showControlsModal, isControlsModalOpen } from './controls-modal.js';
+import { initMasterGain, stopMenuMusic } from './audio.js';
 
 // Resolve asset paths for both local dev (/) and GitHub Pages (/ttt/)
 const asset = (path) => import.meta.env.BASE_URL + path.replace(/^\//, '');
@@ -20,6 +21,7 @@ import { HorizontalTiltShiftShader } from 'three/addons/shaders/HorizontalTiltSh
 import { VerticalTiltShiftShader } from 'three/addons/shaders/VerticalTiltShiftShader.js';
 import RAPIER from '@dimforge/rapier3d';
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+const masterGain = initMasterGain(audioCtx);
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────
 const showCollisionBox = false;
@@ -351,8 +353,10 @@ let impactFlashAge = -1;
 let playerKnockbackVel = { x: 0, y: 0, z: 0 };
 let enemyKnockbackVel = { x: 0, y: 0, z: 0 };
 let healthPickups = [];
+let ammoPickups = [];
 const impactFlashDuration = 0.7;
 const healthPickupRadius = 2.5;
+const ammoPickupRadius = 2.5;
 const healthPickupAmount = 0.3;
 const cannonBallGeo = new THREE.SphereGeometry(0.2, 8, 8);
 const cannonBallMat = new THREE.MeshStandardMaterial({
@@ -449,7 +453,7 @@ function playOnce(buffer) {
   if (!buffer) return;
   const src = audioCtx.createBufferSource();
   src.buffer = buffer;
-  src.connect(audioCtx.destination);
+  src.connect(masterGain);
   src.start(0);
 }
 
@@ -464,7 +468,7 @@ function startHeatBeamSound(isMinigun) {
   heatBeamSource = audioCtx.createBufferSource();
   heatBeamSource.buffer = buf;
   heatBeamSource.loop = true;
-  heatBeamSource.connect(audioCtx.destination);
+  heatBeamSource.connect(masterGain);
   heatBeamSource.start(0);
 }
 
@@ -487,7 +491,7 @@ function updateEngineSound() {
     engineSource.loop = true;
     engineGain = audioCtx.createGain();
     engineGain.gain.value = 0;  // Fade in
-    engineSource.connect(engineGain).connect(audioCtx.destination);
+    engineSource.connect(engineGain).connect(masterGain);
     engineSource.start(0);
   } else if (engineSource && normalized === 0) {
     // Idle rumble continues! Just drop pitch/volume low.
@@ -650,12 +654,13 @@ const SPAWN_NAMES = {
   enemyTank: 'Spawn_Enemy_Tank',
   enemyTurret: 'Spawn_Enemy_Turret',
   turret: 'Spawn_Turret',
-  health: 'Spawn_Health'
+  health: 'Spawn_Health',
+  ammo: 'Spawn_Ammo'
 };
 
 function collectSpawnPoints(level) {
   level.updateMatrixWorld(true);
-  const spawns = { player: null, enemyTank: [], enemyTurret: [], health: [] };
+  const spawns = { player: null, enemyTank: [], enemyTurret: [], health: [], ammo: [] };
   const toRemove = [];
   level.traverse((c) => {
     if (c.name.startsWith(SPAWN_NAMES.player)) {
@@ -669,6 +674,9 @@ function collectSpawnPoints(level) {
       toRemove.push(c);
     } else if (c.name.startsWith(SPAWN_NAMES.health)) {
       spawns.health.push({ position: c.getWorldPosition(new THREE.Vector3()), rotation: c.getWorldQuaternion(new THREE.Quaternion()) });
+      toRemove.push(c);
+    } else if (c.name.startsWith(SPAWN_NAMES.ammo)) {
+      spawns.ammo.push({ position: c.getWorldPosition(new THREE.Vector3()), rotation: c.getWorldQuaternion(new THREE.Quaternion()) });
       toRemove.push(c);
     }
   });
@@ -706,6 +714,7 @@ function stopGame() {
 }
 
 async function init(levelId = 'level-01', tankId = 'tank-01') {
+  stopMenuMusic();
   loadKeybindings();
   gameActive = true;
   currentLevelId = levelId;
@@ -735,6 +744,7 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   cannonBalls = [];
   explosionPieces = [];
   healthPickups = [];
+  ammoPickups = [];
   bulletHoles.length = 0;
   currentSpeed = 0;
   currentTurnSpeed = 0;
@@ -914,6 +924,14 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   await loadWeaponSounds();
   await loadGameSounds();
 
+  // Helper: add broad area light under pickup (PointLight for wide visibility)
+  function addPickupLight(pickup, color, intensity = 3) {
+    const light = new THREE.PointLight(color, intensity, 12, 1);
+    light.position.set(0, -0.5, 0);
+    pickup.add(light);
+    return light;
+  }
+
   // Health pickups at Spawn_Health positions
   if (spawns.health.length > 0) {
     try {
@@ -924,11 +942,31 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
         const pickup = healthTemplate.clone();
         pickup.position.copy(s.position);
         pickup.quaternion.copy(s.rotation);
+        addPickupLight(pickup, 0x00ff00, 3); // green
         scene.add(pickup);
         healthPickups.push({ mesh: pickup, collected: false });
       }
     } catch (e) {
       console.warn('Health pickup model not found, skipping:', e.message);
+    }
+  }
+
+  // Ammo pickups at Spawn_Ammo positions
+  if (spawns.ammo.length > 0) {
+    try {
+      const ammoGlb = await loader.loadAsync(asset('/assets/items/ammo.glb'));
+      const ammoTemplate = ammoGlb.scene;
+      ammoTemplate.traverse((c) => { if (c.isMesh) c.castShadow = c.receiveShadow = true; });
+      for (const s of spawns.ammo) {
+        const pickup = ammoTemplate.clone();
+        pickup.position.copy(s.position);
+        pickup.quaternion.copy(s.rotation);
+        addPickupLight(pickup, 0xffff00, 3); // yellow
+        scene.add(pickup);
+        ammoPickups.push({ mesh: pickup, collected: false, baseY: s.position.y });
+      }
+    } catch (e) {
+      console.warn('Ammo pickup model not found, skipping:', e.message);
     }
   }
 
@@ -1072,9 +1110,9 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
           </div>
         </div>
         <div class="touch-joystick-and-angle">
-          <div class="touch-joystick-zone touch-joystick-drive" id="touch-joystick-drive" aria-label="Drive">
+          <div class="touch-joystick-zone touch-joystick-rotate" id="touch-joystick-zone" aria-label="Rotate">
             <div class="touch-joystick-base">
-              <div class="touch-joystick-stick" id="touch-joystick-drive-stick"><img src="${asset('/assets/icons/icon-drive.svg')}" class="touch-control-icon" alt="" aria-hidden="true"></div>
+              <div class="touch-joystick-stick" id="touch-joystick-stick"><img src="${asset('/assets/icons/icon-arrows-all.svg')}" class="touch-control-icon" alt="" aria-hidden="true"></div>
             </div>
           </div>
           <div class="touch-angle-zone" id="touch-angle-zone" aria-label="Angle">
@@ -1085,9 +1123,9 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
         </div>
       </div>
       <div class="touch-right">
-        <div class="touch-joystick-zone touch-joystick-rotate" id="touch-joystick-zone" aria-label="Rotate">
+        <div class="touch-joystick-zone touch-joystick-drive" id="touch-joystick-drive" aria-label="Drive">
           <div class="touch-joystick-base">
-            <div class="touch-joystick-stick" id="touch-joystick-stick"><img src="${asset('/assets/icons/icon-arrows-all.svg')}" class="touch-control-icon" alt="" aria-hidden="true"></div>
+            <div class="touch-joystick-stick" id="touch-joystick-drive-stick"><img src="${asset('/assets/icons/icon-drive.svg')}" class="touch-control-icon" alt="" aria-hidden="true"></div>
           </div>
         </div>
         <div class="touch-buttons-near-joystick">
@@ -1440,6 +1478,50 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   });
   document.addEventListener('keyup', (e) => (keys[e.code] = false));
 
+  // Mouse: primary = fire, secondary = weapon swap, scroll = angle, side buttons = zoom
+  document.addEventListener('mousedown', (e) => {
+    if (isControlsModalOpen()) return;
+    const fireKey = getKeyForAction('fire');
+    if (e.button === 0) {
+      e.preventDefault();
+      keys[fireKey] = true;
+      const w1 = getWeapon(1);
+      const w2 = getWeapon(2);
+      const canFireProjectile = !playerDead && weaponMode === 1 && w1 && isProjectileWeapon(w1) && cannonAmmo > 0 && cannonCooldown <= 0;
+      const canFireMortar = !playerDead && weaponMode === 2 && w2?.type === 'mortar' && cannonAmmo > 0 && weapon2Cooldown <= 0;
+      const canFireEMP = !playerDead && weaponMode === 2 && w2?.type === 'emp' && weapon2Cooldown <= 0;
+      const canFireHeatBeam = !playerDead && (weaponMode === 1 || weaponMode === 2) && isHeatBeamWeapon(getWeapon(weaponMode)) && mgHeat < (getWeapon(weaponMode)?.heatMax ?? 1) && !mgOverheated;
+      if (canFireProjectile || canFireMortar || canFireEMP) barrelRecoil = 1;
+      if (canFireProjectile) fireCannonPending = true;
+      if (canFireMortar) fireMortarPending = true;
+      if (canFireEMP) fireEMPPending = true;
+    }
+    if (e.button === 2) {
+      e.preventDefault();
+      if (playerCharacter?.weapons?.[1]) requestWeaponSwitch(weaponMode === 1 ? 2 : 1);
+    }
+    if (e.button === 4) {
+      e.preventDefault();
+      camZoomFactor = Math.min(4, camZoomFactor * 2);
+    }
+    if (e.button === 5) {
+      e.preventDefault();
+      camZoomFactor = Math.max(0.25, camZoomFactor * 0.5);
+    }
+  });
+  document.addEventListener('mouseup', (e) => {
+    if (e.button === 0) keys[getKeyForAction('fire')] = false;
+  });
+  document.addEventListener('contextmenu', (e) => {
+    if (gameActive && !isControlsModalOpen()) e.preventDefault();
+  });
+  document.addEventListener('wheel', (e) => {
+    if (isControlsModalOpen()) return;
+    e.preventDefault();
+    const scrollScale = 0.002;
+    bodyAimPitch = Math.max(-bodyAimMax, Math.min(bodyAimMax, bodyAimPitch - e.deltaY * scrollScale));
+  }, { passive: false });
+
   showControlsIfFirstLevel01(!isTouchMode(), levelId);
 
   if (!animateLoopStarted) {
@@ -1737,7 +1819,7 @@ function animate() {
       if (laserBuffer) {
         const src = audioCtx.createBufferSource();
         src.buffer = laserBuffer;
-        src.connect(audioCtx.destination);
+        src.connect(masterGain);
         src.start(0);
         setTimeout(() => src.stop(), turretLaserDuration * 1000);
       }
@@ -1863,6 +1945,33 @@ function animate() {
         playOnce(repairBuffer);
       }
     }
+    // Ammo pickup collection (refills to max)
+    const w1 = getWeapon(1);
+    const ammoMax = w1?.ammoMax ?? cannonAmmoMax;
+    for (const p of ammoPickups) {
+      if (p.collected) continue;
+      const dx = p.mesh.position.x - posFinal.x;
+      const dy = p.mesh.position.y - posFinal.y;
+      const dz = p.mesh.position.z - posFinal.z;
+      const distSq = dx * dx + dy * dy + dz * dz;
+      if (distSq < ammoPickupRadius * ammoPickupRadius) {
+        p.collected = true;
+        scene.remove(p.mesh);
+        cannonAmmo = ammoMax;
+        playOnce(repairBuffer);
+      }
+    }
+  }
+
+  // Pickup animations: health rotates, ammo bobs
+  for (const p of healthPickups) {
+    if (p.collected) continue;
+    p.mesh.rotation.y += dt * 0.5;
+  }
+  for (const p of ammoPickups) {
+    if (p.collected) continue;
+    const bob = 0.15 * Math.sin(now * 2);
+    p.mesh.position.y = p.baseY + bob;
   }
 
   for (const e of enemies) {

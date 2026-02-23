@@ -10,6 +10,7 @@ import { getLevels } from './levels.js';
 import { getCharacters } from './characters.js';
 import { initTankPreview, setTankCharacter, setTankPreviewWeapon, destroyTankPreview } from './tank-preview.js';
 import { setInputModeFromPointerEvent } from './input-mode.js';
+import { getOverallVolume, getEffectiveSfxVolume, getMusicVolume, playMenuMusic, setAssetFn, setOverallVolume, setMusicVolume } from './audio.js';
 
 let selectedTankId = 'tank-01';
 let characters = [];
@@ -17,12 +18,14 @@ let tankIndex = 0;
 
 function playQuickClick() {
   const snd = new Audio(asset('/assets/audio/quickclick.mp3'));
+  snd.volume = getEffectiveSfxVolume();
   snd.play().catch(() => {});
 }
 
 function playTankSpeech(char) {
   const path = char?.speechPath || `/assets/audio/speech/${char?.name}.mp3`;
   const snd = new Audio(asset(path));
+  snd.volume = getEffectiveSfxVolume();
   snd.play().catch(() => {});
 }
 
@@ -31,16 +34,25 @@ async function loadGame(levelId = 'level-01', tankId = 'tank-01') {
   await init(levelId, tankId);
 }
 
+function showVolumeControls(show) {
+  const el = document.getElementById('volume-controls');
+  if (el) el.classList.toggle('hidden', !show);
+}
+
 function showTankSelect() {
   document.getElementById('splash-start-intro').classList.add('hidden');
   document.getElementById('logo-container').classList.add('hidden');
   document.getElementById('tank-select').classList.remove('hidden');
+  showVolumeControls(true);
+  playMenuMusic();
   initTankSelect();
 }
 
 function showLevelSelect() {
   document.getElementById('tank-select').classList.add('hidden');
   document.getElementById('level-select').classList.remove('hidden');
+  showVolumeControls(true);
+  playMenuMusic();
   const logoImg = document.querySelector('#level-select-logo img');
   if (logoImg) logoImg.src = asset('/assets/images/Logo.svg');
   buildLevelGrid();
@@ -183,6 +195,7 @@ async function runLogoAnimation() {
       if (i === 0) {
         setTimeout(() => {
           const snd = new Audio(asset('/assets/audio/speech/teenytinytanks.mp3'));
+          snd.volume = getEffectiveSfxVolume();
           snd.play().catch(() => {});
         }, DROP_DURATION * 0.55);
       }
@@ -214,6 +227,8 @@ export function goToMainMenu() {
   document.getElementById('splash').classList.remove('hidden');
   document.getElementById('tank-select').classList.add('hidden');
   document.getElementById('level-select').classList.remove('hidden');
+  showVolumeControls(true);
+  playMenuMusic();
   const logoImg = document.querySelector('#level-select-logo img');
   if (logoImg) logoImg.src = asset('/assets/images/Logo.svg');
   buildLevelGrid();
@@ -244,7 +259,34 @@ function buildLevelGrid() {
   });
 }
 
+function updateSliderFill(el) {
+  if (el) el.style.setProperty('--fill', el.value + '%');
+}
+
+function initVolumeSliders() {
+  const sfxEl = document.getElementById('volume-sfx');
+  const musicEl = document.getElementById('volume-music');
+  if (sfxEl) {
+    sfxEl.value = Math.round(getOverallVolume() * 100);
+    updateSliderFill(sfxEl);
+    sfxEl.addEventListener('input', () => {
+      setOverallVolume(sfxEl.value / 100);
+      updateSliderFill(sfxEl);
+    });
+  }
+  if (musicEl) {
+    musicEl.value = Math.round(getMusicVolume() * 100);
+    updateSliderFill(musicEl);
+    musicEl.addEventListener('input', () => {
+      setMusicVolume(musicEl.value / 100);
+      updateSliderFill(musicEl);
+    });
+  }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
+  setAssetFn(asset);
+  initVolumeSliders();
   if (devmode) {
     document.getElementById('splash').classList.add('hidden');
     document.getElementById('game-container').classList.remove('hidden');

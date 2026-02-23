@@ -3,6 +3,7 @@
  */
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { getEffectiveSfxVolume } from './audio.js';
 
 const asset = (path) => import.meta.env.BASE_URL + path.replace(/^\//, '');
 
@@ -61,7 +62,7 @@ function easeOutBounce(t) {
 
 function playClank() {
   const snd = new Audio(asset('/assets/audio/thud.mp3'));
-  snd.volume = 0.1;
+  snd.volume = getEffectiveSfxVolume() * 0.1;
   snd.play().catch(() => {});
 }
 
