@@ -84,6 +84,8 @@ const enemyShootCooldown = 10;
 const enemyAimThreshold = 0.92;
 const enemyStuckDist = 2;
 const enemyStuckTime = 0.8;
+const enemyLedgeDropThreshold = 1.2;
+const enemyLedgeCheckDist = 1.5;
 const turretLaserRange = 15;
 const turretLaserDuration = 0.5;
 const turretLaserCooldown = 6;
@@ -99,6 +101,62 @@ function getWeapon(mode) {
 
 function isProjectileWeapon(w) {
   return w?.type === 'cannon' || w?.type === 'mortar';
+}
+
+/** Map weapon type to Body's Weapon-X object name (e.g. cannon -> Weapon-Cannon) */
+function getWeaponBarrelName(weaponType) {
+  if (!weaponType) return null;
+  return 'Weapon-' + weaponType.charAt(0).toUpperCase() + weaponType.slice(1);
+}
+
+/** Find weapon barrel in mesh, trying canonical and lowercase names (e.g. Weapon-EMP and Weapon-emp) */
+function findWeaponBarrel(mesh, weaponType) {
+  if (!mesh || !weaponType) return null;
+  return mesh.getObjectByName(getWeaponBarrelName(weaponType)) || mesh.getObjectByName('Weapon-' + weaponType.toLowerCase());
+}
+
+/** Collect all Weapon-* objects from mesh (traverse to catch any naming variants, case-insensitive) */
+function collectAllWeaponBarrels(mesh) {
+  const list = [];
+  if (!mesh) return list;
+  mesh.traverse((c) => {
+    if (c.name && c.name.toLowerCase().startsWith('weapon-')) list.push(c);
+  });
+  return list;
+}
+
+/** Find weapon barrel by type in collected list (handles GLB export naming variations) */
+function findBarrelInList(weaponObjs, weaponType) {
+  if (!weaponType) return null;
+  const canonical = getWeaponBarrelName(weaponType);
+  const lower = 'Weapon-' + weaponType.toLowerCase();
+  return weaponObjs.find((o) => {
+    const n = o.name || '';
+    return n === canonical || n === lower || n.toLowerCase() === lower.toLowerCase();
+  }) || null;
+}
+
+/** Show the barrel for the current weapon mode, hide others. Handles missing barrels gracefully. */
+function setActiveWeaponBarrel(mode) {
+  const w = getWeapon(mode);
+  const weaponObjs = collectAllWeaponBarrels(tankMesh);
+  const allBarrels = [...new Set([...Object.values(weaponBarrels), ...weaponObjs, fallbackBarrel])].filter(Boolean);
+  allBarrels.forEach((b) => { b.visible = false; });
+
+  let active = fallbackBarrel;
+  if (w) {
+    let byType = weaponBarrels[w.type];
+    if (!byType) byType = findBarrelInList(weaponObjs, w.type);
+    if (byType) active = byType;
+    else if (fallbackBarrel) active = fallbackBarrel;
+  }
+  if (active) {
+    active.visible = true;
+    barrelGroup = active;
+    barrelDefaultZ = active.position.z;
+  } else {
+    barrelGroup = null;
+  }
 }
 
 function isHeatBeamWeapon(w) {
@@ -159,6 +217,9 @@ scene.add(new THREE.AmbientLight(0xffffff, 1));
 
 let world, tankRigidBody, tankMesh, bodyGroup, bodyDefaultY;
 let barrelGroup, barrelDefaultZ;
+/** @type {Object.<string, THREE.Object3D>} */
+let weaponBarrels = {};
+let fallbackBarrel = null;
 let wheelFL, wheelFR, wheelBL, wheelBR;
 let collisionBoxMesh = null;
 const keys = {};
@@ -613,6 +674,9 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   impactFlashAge = -1;
   tankRigidBody = null;
   tankMesh = null;
+  weaponBarrels = {};
+  fallbackBarrel = null;
+  barrelGroup = null;
   enemies = [];
   turrets = [];
   Object.keys(keys).forEach((k) => (keys[k] = false));
@@ -669,13 +733,21 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   const tankGlb = await loader.loadAsync(playerTankPath);
   tankMesh = tankGlb.scene;
   bodyGroup = tankMesh.getObjectByName('Body');
-  barrelGroup = tankMesh.getObjectByName('Barrel');
+  fallbackBarrel = tankMesh.getObjectByName('Barrel');
   wheelFL = tankMesh.getObjectByName('Wheel-FL');
   wheelFR = tankMesh.getObjectByName('Wheel-FR');
   wheelBL = tankMesh.getObjectByName('Wheel-BL');
   wheelBR = tankMesh.getObjectByName('Wheel-BR');
   if (bodyGroup) bodyDefaultY = bodyGroup.position.y;
-  if (barrelGroup) barrelDefaultZ = barrelGroup.position.z;
+
+  weaponBarrels = {};
+  const weaponObjs = collectAllWeaponBarrels(tankMesh);
+  for (const type of ['cannon', 'laser', 'minigun', 'mortar', 'emp']) {
+    const obj = findWeaponBarrel(tankMesh, type) || findBarrelInList(weaponObjs, type);
+    if (obj) weaponBarrels[type] = obj;
+  }
+  setActiveWeaponBarrel(1);
+
   tankMesh.traverse((c) => {
     if (c.isMesh) c.castShadow = c.receiveShadow = true;
   });
@@ -950,13 +1022,13 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
       const canFireMortar = !playerDead && weaponMode === 2 && w2?.type === 'mortar' && cannonAmmo > 0 && weapon2Cooldown <= 0 && !e.repeat;
       const canFireEMP = !playerDead && weaponMode === 2 && w2?.type === 'emp' && weapon2Cooldown <= 0 && !e.repeat;
       const canFireHeatBeam = !playerDead && (weaponMode === 1 || weaponMode === 2) && isHeatBeamWeapon(getWeapon(weaponMode)) && mgHeat < (getWeapon(weaponMode)?.heatMax ?? 1) && !mgOverheated;
-      if (canFireProjectile || canFireMortar || canFireEMP || canFireHeatBeam) barrelRecoil = 1;
+      if (canFireProjectile || canFireMortar || canFireEMP) barrelRecoil = 1;
       if (canFireProjectile) fireCannonPending = true;
       if (canFireMortar) fireMortarPending = true;
       if (canFireEMP) fireEMPPending = true;
     }
-    if (e.code === 'Digit1') weaponMode = 1;
-    if (e.code === 'Digit2' && playerCharacter?.weapons?.[1]) weaponMode = 2;
+    if (e.code === 'Digit1') { weaponMode = 1; setActiveWeaponBarrel(1); }
+    if (e.code === 'Digit2' && playerCharacter?.weapons?.[1]) { weaponMode = 2; setActiveWeaponBarrel(2); }
   });
   document.addEventListener('keyup', (e) => (keys[e.code] = false));
 
@@ -1116,7 +1188,21 @@ function animate() {
     let eTargetSpeed = enemyDisabled ? 0 : (dist > 8 ? enemySpeed : 0);
     let eTargetTurn = enemyDisabled ? 0 : (cross.y > 0.1 ? enemyTurnSpeed : cross.y < -0.1 ? -enemyTurnSpeed : 0);
 
-    if (wallHit || (!hitPlayer && distMoved < 0.02 && eTargetSpeed > 0)) {
+    // Ledge detection: when moving forward, check if ground drops ahead (don't drive off edges)
+    let ledgeAhead = false;
+    if (eTargetSpeed > 0 && !enemyDisabled) {
+      const ledgeOrigin = { x: ePos.x + eForward.x * enemyLedgeCheckDist, y: ePos.y + 0.5, z: ePos.z + eForward.z * enemyLedgeCheckDist };
+      const ledgeRay = new RAPIER.Ray(ledgeOrigin, { x: 0, y: -1, z: 0 });
+      const ledgeHit = world.castRayAndGetNormal(ledgeRay, 6, true, null, null, null, e.rigidBody);
+      if (!ledgeHit) {
+        ledgeAhead = true;
+      } else {
+        const groundY = ledgeOrigin.y - ledgeHit.toi;
+        if (ePos.y - groundY > enemyLedgeDropThreshold) ledgeAhead = true;
+      }
+    }
+
+    if (wallHit || ledgeAhead || (!hitPlayer && distMoved < 0.02 && eTargetSpeed > 0)) {
       e.stuckTimer += dt;
       if (e.stuckTimer > enemyStuckTime * 0.3) {
         eTargetSpeed = -enemyReverseSpeed;
@@ -1471,15 +1557,19 @@ function animate() {
   const heatBeamW = getWeapon(weaponMode);
   const heatBeamActive = heatBeamW && isHeatBeamWeapon(heatBeamW) && keys['Space'] && mgHeat < (heatBeamW.heatMax ?? 1) && !mgOverheated;
   if (barrelGroup && !playerDead && tankMesh) {
-    if (heatBeamActive) barrelRecoil = 1;
-    barrelRecoil = Math.max(0, barrelRecoil - recoilSpeed * dt);
-    barrelGroup.position.z = (barrelDefaultZ ?? 0) + recoilAmount * barrelRecoil;
+    if (!heatBeamActive) {
+      barrelRecoil = Math.max(0, barrelRecoil - recoilSpeed * dt);
+      barrelGroup.position.z = (barrelDefaultZ ?? 0) + recoilAmount * barrelRecoil;
+    }
   }
 
   if (tankMesh) tankMesh.updateMatrixWorld(true);
-  const barrelTip = barrelGroup && tankMesh ? new THREE.Vector3(0, 0, -0.5).applyMatrix4(barrelGroup.matrixWorld) : new THREE.Vector3(posFinal.x, posFinal.y, posFinal.z);
-  const fireForward = barrelGroup && tankMesh
-    ? new THREE.Vector3(0, 0, -1).clone().transformDirection(barrelGroup.matrixWorld)
+  // Use turret-height source for tip: prefer fallback/body (Weapon-* may be at floor in some models like tank-04)
+  const barrelForTip = fallbackBarrel || bodyGroup || weaponBarrels['cannon'] || barrelGroup;
+  const dirSource = barrelGroup || barrelForTip;
+  const barrelTip = barrelForTip && tankMesh ? new THREE.Vector3(0, 0, -0.5).applyMatrix4(barrelForTip.matrixWorld) : new THREE.Vector3(posFinal.x, posFinal.y, posFinal.z);
+  const fireForward = dirSource && tankMesh
+    ? new THREE.Vector3(0, 0, -1).clone().transformDirection(dirSource.matrixWorld)
     : new THREE.Vector3(0, 0, -1);
   if (muzzleLight) muzzleLight.position.copy(barrelTip).addScaledVector(fireForward.clone().normalize(), 1.5);
 

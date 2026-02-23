@@ -69,7 +69,7 @@
             "speed": 18,
             "acceleration": 1.2,
             "isUnlocked": true,
-            "glbPath": "/assets/characters/tank-01.glb",
+            "glbPath": "/assets/characters/tank-03.glb",
             "speechPath": "/assets/audio/speech/chauncy.mp3",
             "weapons": [
                 {
@@ -95,7 +95,7 @@
             "speed": 18,
             "acceleration": 1.2,
             "isUnlocked": true,
-            "glbPath": "/assets/characters/tank-01.glb",
+            "glbPath": "/assets/characters/tank-04.glb",
             "speechPath": "/assets/audio/speech/mable.mp3",
             "weapons": [
                 {

@@ -8,7 +8,7 @@ const asset = (path) => import.meta.env.BASE_URL + path.replace(/^\//, '');
 
 import { getLevels } from './levels.js';
 import { getCharacters } from './characters.js';
-import { initTankPreview, setTankCharacter, destroyTankPreview } from './tank-preview.js';
+import { initTankPreview, setTankCharacter, setTankPreviewWeapon, destroyTankPreview } from './tank-preview.js';
 
 let selectedTankId = 'tank-01';
 let characters = [];
@@ -103,8 +103,8 @@ async function updateTankDisplay() {
   if (!char) return;
   document.getElementById('tank-name').textContent = char.name;
   const weaponsStr = (char.weapons?.length
-    ? char.weapons.map((w) => `<div class="weapon-display">${w.name}</div>`).join('')
-    : `<div class="weapon-display">Cannon</div>`);
+    ? char.weapons.map((w, i) => `<div class="weapon-display" data-weapon-index="${i}" role="button" tabindex="0">${w.name}</div>`).join('')
+    : `<div class="weapon-display" data-weapon-index="0">Cannon</div>`);
   document.getElementById('tank-stats').innerHTML = `
     ${statBar(char.health, 150, 'HEALTH')}
     ${statBar(char.speed, 20, 'SPEED')}
@@ -113,6 +113,19 @@ async function updateTankDisplay() {
     <div class="weapons-row">${weaponsStr}</div>
     ${!char.isUnlocked ? '<span style="color:#ff6b6b;">Locked</span>' : ''}
   `;
+  document.querySelectorAll('.weapon-display').forEach((el) => {
+    el.onclick = () => {
+      const idx = parseInt(el.dataset.weaponIndex, 10);
+      if (!isNaN(idx)) {
+        playQuickClick();
+        setTankPreviewWeapon(idx);
+        document.querySelectorAll('.weapon-display').forEach((e) => e.classList.remove('weapon-display-active'));
+        el.classList.add('weapon-display-active');
+      }
+    };
+  });
+  const firstWeapon = document.querySelector('.weapon-display');
+  if (firstWeapon) firstWeapon.classList.add('weapon-display-active');
   const btn = document.getElementById('tank-select-continue');
   btn.disabled = !char.isUnlocked;
 }

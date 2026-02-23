@@ -9,17 +9,14 @@ const asset = (path) => import.meta.env.BASE_URL + path.replace(/^\//, '');
 let scene, camera, renderer, tankMesh = null;
 let groundPlane = null;
 let animationId = null;
+let previewWeaponIndex = 0;
+let previewCharacter = null;
 let dropAnimationProgress = 1;
 let dropImpactPlayed = false;
 
 const DROP_START_Y = 4;
 const DROP_END_Y = 0;
 const DROP_DURATION_MS = 450;
-
-function hexToColor(hex) {
-  const c = new THREE.Color(hex);
-  return { r: c.r, g: c.g, b: c.b };
-}
 
 function easeOutBounce(t) {
   const n1 = 7.5625, d1 = 2.75;
@@ -33,6 +30,35 @@ function playClank() {
   const snd = new Audio(asset('/assets/audio/thud.mp3'));
   snd.volume = 0.1;
   snd.play().catch(() => {});
+}
+
+function getWeaponBarrelName(weaponType) {
+  if (!weaponType) return null;
+  return 'Weapon-' + weaponType.charAt(0).toUpperCase() + weaponType.slice(1);
+}
+
+function findWeaponBarrel(mesh, weaponType) {
+  if (!mesh || !weaponType) return null;
+  return mesh.getObjectByName(getWeaponBarrelName(weaponType)) || mesh.getObjectByName('Weapon-' + weaponType.toLowerCase());
+}
+
+function collectAllWeaponBarrels(mesh) {
+  const list = [];
+  if (!mesh) return list;
+  mesh.traverse((c) => {
+    if (c.name && c.name.toLowerCase().startsWith('weapon-')) list.push(c);
+  });
+  return list;
+}
+
+function findBarrelInList(weaponObjs, weaponType) {
+  if (!weaponType) return null;
+  const canonical = getWeaponBarrelName(weaponType);
+  const lower = 'Weapon-' + weaponType.toLowerCase();
+  return weaponObjs.find((o) => {
+    const n = o.name || '';
+    return n === canonical || n === lower || n.toLowerCase() === lower.toLowerCase();
+  }) || null;
 }
 
 export async function initTankPreview(canvas, character) {
@@ -53,14 +79,15 @@ export async function initTankPreview(canvas, character) {
   groundPlane.receiveShadow = true;
   scene.add(groundPlane);
 
-  // Improved 3-point lighting
-  const keyLight = new THREE.DirectionalLight(0xffffff, 2.2);
-  keyLight.position.set(4, 10, 6);
+  // Match main game lighting: neutral white directional + ambient (no warm tints)
+  const keyLight = new THREE.DirectionalLight(0xffffff, 2);
+  keyLight.position.set(8, 16, 8);
+  keyLight.target.position.set(0, 0, 0);
   keyLight.castShadow = true;
   keyLight.shadow.mapSize.width = 1024;
   keyLight.shadow.mapSize.height = 1024;
   keyLight.shadow.camera.near = 0.5;
-  keyLight.shadow.camera.far = 30;
+  keyLight.shadow.camera.far = 60;
   keyLight.shadow.camera.left = -6;
   keyLight.shadow.camera.right = 6;
   keyLight.shadow.camera.top = 6;
@@ -69,16 +96,7 @@ export async function initTankPreview(canvas, character) {
   keyLight.shadow.normalBias = 0.02;
   scene.add(keyLight);
 
-  const fillLight = new THREE.DirectionalLight(0xffeedd, 0.8);
-  fillLight.position.set(-5, 5, -4);
-  scene.add(fillLight);
-
-  const rimLight = new THREE.DirectionalLight(0xffffff, 0.6);
-  rimLight.position.set(0, 3, -8);
-  scene.add(rimLight);
-
-  const ambient = new THREE.AmbientLight(0xffddcc, 0.5);
-  scene.add(ambient);
+  scene.add(new THREE.AmbientLight(0xffffff, 1));
 
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
   renderer.shadowMap.enabled = true;
@@ -86,6 +104,8 @@ export async function initTankPreview(canvas, character) {
   resize();
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.2;
 
   window.addEventListener('resize', resize);
 
@@ -115,15 +135,27 @@ async function loadTank(character) {
   const glb = await loader.loadAsync(glbPath);
   tankMesh = glb.scene;
 
-  const color = character.color ? hexToColor(character.color) : { r: 0.3, g: 0.5, b: 0.85 };
   tankMesh.traverse((c) => {
     if (c.isMesh && c.material) {
       c.material = c.material.clone();
-      if (c.material.color) c.material.color.multiplyScalar(0.8).lerp(new THREE.Color(color.r, color.g, color.b), 0.5);
       c.castShadow = true;
       c.receiveShadow = true;
     }
   });
+
+  // Collect barrels and show primary weapon
+  const weaponObjs = collectAllWeaponBarrels(tankMesh);
+  const fallbackBarrel = tankMesh.getObjectByName('Barrel');
+  const allBarrels = [...new Set([...weaponObjs, fallbackBarrel])].filter(Boolean);
+  allBarrels.forEach((b) => { b.visible = false; });
+
+  previewWeaponIndex = 0;
+  previewCharacter = character;
+  const primaryWeapon = character?.weapons?.[0];
+  const primaryType = primaryWeapon?.type;
+  const primaryBarrel = primaryType ? (findWeaponBarrel(tankMesh, primaryType) || findBarrelInList(weaponObjs, primaryType)) : null;
+  const toShow = primaryBarrel || fallbackBarrel;
+  if (toShow) toShow.visible = true;
 
   tankMesh.scale.setScalar(1.4);
   tankMesh.rotation.y = Math.PI;
@@ -136,6 +168,20 @@ async function loadTank(character) {
 
 export async function setTankCharacter(character) {
   if (character && scene) await loadTank(character);
+}
+
+export function setTankPreviewWeapon(weaponIndex) {
+  if (!tankMesh || !previewCharacter) return;
+  const w = previewCharacter.weapons?.[weaponIndex];
+  const weaponType = w?.type;
+  const weaponObjs = collectAllWeaponBarrels(tankMesh);
+  const fallbackBarrel = tankMesh.getObjectByName('Barrel');
+  const allBarrels = [...new Set([...weaponObjs, fallbackBarrel])].filter(Boolean);
+  allBarrels.forEach((b) => { b.visible = false; });
+  const barrel = weaponType ? (findWeaponBarrel(tankMesh, weaponType) || findBarrelInList(weaponObjs, weaponType)) : null;
+  const toShow = barrel || fallbackBarrel;
+  if (toShow) toShow.visible = true;
+  previewWeaponIndex = weaponIndex;
 }
 
 export function destroyTankPreview() {
