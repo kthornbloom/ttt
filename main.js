@@ -396,6 +396,10 @@ let youWinOverlayEl = null;
 let escapePauseActive = false;
 let animateLoopStarted = false;
 let gameActive = false;
+/** Touch joystick: { dx, dy } in [-1,1], rotates tank to face (mobile only) */
+let touchJoystickInput = { dx: 0, dy: 0 };
+/** Touch drive: { value } in [-1,1], drag up=forward down=back, distance=speed (mobile only) */
+let touchDriveInput = { value: 0 };
 
 async function loadAudio(url) {
   try {
@@ -734,6 +738,9 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   bulletHoles.length = 0;
   currentSpeed = 0;
   currentTurnSpeed = 0;
+  touchJoystickInput.dx = 0;
+  touchJoystickInput.dy = 0;
+  touchDriveInput.value = 0;
   bodyRoll = 0;
   bodyPitch = 0;
   bodyAimPitch = 0;
@@ -769,10 +776,17 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   camZoomFactor = 1;
 
   if (touchControlsEl) {
-    const angleSl = document.getElementById('touch-slider-angle');
-    const zoomSl = document.getElementById('touch-slider-zoom');
-    if (angleSl) angleSl.value = 0;
-    if (zoomSl) zoomSl.value = 1;
+    bodyAimPitch = 0;
+    camZoomFactor = 1;
+    const zt = document.getElementById('touch-zoom-thumb');
+    const at = document.getElementById('touch-angle-thumb');
+    const dz = document.getElementById('touch-drive-thumb');
+    if (zt) {
+      const zr = document.getElementById('touch-zoom-zone')?.getBoundingClientRect();
+      if (zr) zt.style.left = `${2 + (camZoomFactor - 0.25) / 3.75 * (zr.width - 44)}px`;
+    }
+    if (at) at.style.transform = 'translate(-50%, 0)';
+    if (dz) dz.style.transform = 'translate(-50%, 0)';
   }
 
   // Cleanup previous level and game objects when re-initializing
@@ -1050,23 +1064,34 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     touchControlsEl = document.createElement('div');
     touchControlsEl.className = 'touch-controls';
     touchControlsEl.innerHTML = `
-      <div class="touch-joystick-zone" id="touch-joystick-zone">
-        <div class="touch-joystick-base">
-          <div class="touch-joystick-stick" id="touch-joystick-stick"></div>
+      <div class="touch-left">
+        <div class="touch-zoom-zone" id="touch-zoom-zone" aria-label="Zoom">
+          <div class="touch-zoom-track">
+            <div class="touch-zoom-thumb" id="touch-zoom-thumb"><span class="touch-control-icon" aria-hidden="true">🔍</span></div>
+          </div>
+        </div>
+        <div class="touch-joystick-and-angle">
+          <div class="touch-joystick-zone" id="touch-joystick-zone">
+            <div class="touch-joystick-base">
+              <div class="touch-joystick-stick" id="touch-joystick-stick"><span class="touch-control-icon" aria-hidden="true">⊞</span></div>
+            </div>
+          </div>
+          <div class="touch-angle-zone" id="touch-angle-zone" aria-label="Angle">
+            <div class="touch-angle-track">
+              <div class="touch-angle-thumb" id="touch-angle-thumb"><span class="touch-control-icon touch-angle-icon" aria-hidden="true">∠</span></div>
+            </div>
+          </div>
         </div>
       </div>
       <div class="touch-buttons-right">
-        <button class="touch-btn touch-btn-fire" id="touch-btn-fire">FIRE</button>
-        <button class="touch-btn touch-btn-weapon" id="touch-btn-weapon">WPN</button>
-      </div>
-      <div class="touch-sliders">
-        <div class="touch-slider-row">
-          <label>∠</label>
-          <input type="range" class="touch-slider touch-slider-angle" id="touch-slider-angle" min="-1" max="1" step="0.02" value="0">
+        <div class="touch-fire-weapon-row">
+          <button class="touch-btn touch-btn-weapon" id="touch-btn-weapon" aria-label="Weapon">↻</button>
+          <button class="touch-btn touch-btn-fire" id="touch-btn-fire" aria-label="Fire">✺</button>
         </div>
-        <div class="touch-slider-row">
-          <label>🔍</label>
-          <input type="range" class="touch-slider touch-slider-zoom" id="touch-slider-zoom" min="0.25" max="4" step="0.05" value="1">
+        <div class="touch-drive-zone" id="touch-drive-zone" aria-label="Drive">
+          <div class="touch-drive-track">
+            <div class="touch-drive-thumb" id="touch-drive-thumb"><span class="touch-control-icon touch-drive-icon" aria-hidden="true">▲</span></div>
+          </div>
         </div>
       </div>
     `;
@@ -1075,40 +1100,182 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
 
     const joystickZone = document.getElementById('touch-joystick-zone');
     const joystickStick = document.getElementById('touch-joystick-stick');
+    const driveZone = document.getElementById('touch-drive-zone');
+    const driveThumb = document.getElementById('touch-drive-thumb');
+    const zoomZone = document.getElementById('touch-zoom-zone');
+    const zoomThumb = document.getElementById('touch-zoom-thumb');
+    const angleZone = document.getElementById('touch-angle-zone');
+    const angleThumb = document.getElementById('touch-angle-thumb');
     const fireBtn = document.getElementById('touch-btn-fire');
     const weaponBtn = document.getElementById('touch-btn-weapon');
-    const angleSlider = document.getElementById('touch-slider-angle');
-    const zoomSlider = document.getElementById('touch-slider-zoom');
+
+    const DRIVE_DRAG_RANGE = 60;
+    const ZOOM_MIN = 0.25;
+    const ZOOM_MAX = 4;
+    const ZOOM_DEFAULT = 1;
+    const ANGLE_RANGE = 1;
+
+    let drivePointerId = null;
+    let driveCenterY = 0;
+    let zoomPointerId = null;
+    let zoomCenterX = 0;
+    let zoomStartValue = 1;
+    let anglePointerId = null;
+    let angleCenterY = 0;
+    let angleStartValue = 0;
+
+    function onDriveMove(clientY) {
+      const dy = driveCenterY - clientY;
+      const rawValue = dy / DRIVE_DRAG_RANGE;
+      const value = Math.max(-1, Math.min(1, rawValue));
+      touchDriveInput.value = value;
+      const thumbOffset = value * DRIVE_DRAG_RANGE * 0.85;
+      driveThumb.style.transform = `translate(-50%, ${-thumbOffset}px)`;
+    }
+
+    function onDriveEnd() {
+      drivePointerId = null;
+      touchDriveInput.value = 0;
+      driveThumb.style.transform = 'translate(-50%, 0)';
+    }
+
+    function onZoomMove(clientX) {
+      const rect = zoomZone.getBoundingClientRect();
+      const trackWidth = Math.max(1, rect.width - 44);
+      const thumbPos = Math.max(0, Math.min(1, (clientX - rect.left - 22) / trackWidth));
+      const value = ZOOM_MIN + thumbPos * (ZOOM_MAX - ZOOM_MIN);
+      camZoomFactor = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, value));
+      const leftPx = 2 + thumbPos * (rect.width - 44);
+      zoomThumb.style.left = `${leftPx}px`;
+    }
+
+    function onAngleMove(clientY) {
+      const rect = angleZone.getBoundingClientRect();
+      const trackHeight = Math.max(1, rect.height - 44);
+      const centerY = rect.top + rect.height / 2;
+      const dy = centerY - clientY;
+      const rawValue = dy / (trackHeight / 2);
+      const value = Math.max(-1, Math.min(1, rawValue));
+      bodyAimPitch = value * bodyAimMax;
+      const thumbOffset = value * (trackHeight / 2) * 0.85;
+      angleThumb.style.transform = `translate(-50%, ${-thumbOffset}px)`;
+    }
+
+    function onAngleEnd() {
+      anglePointerId = null;
+    }
+
+    driveZone.addEventListener('pointerdown', (e) => {
+      if (drivePointerId !== null) return;
+      e.preventDefault();
+      e.stopPropagation();
+      drivePointerId = e.pointerId;
+      const rect = driveZone.getBoundingClientRect();
+      driveCenterY = rect.top + rect.height / 2;
+      driveZone.setPointerCapture(e.pointerId);
+      onDriveMove(e.clientY);
+    });
+    driveZone.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== drivePointerId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onDriveMove(e.clientY);
+    });
+    driveZone.addEventListener('pointerup', (e) => {
+      if (e.pointerId !== drivePointerId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onDriveEnd();
+    });
+    driveZone.addEventListener('pointercancel', (e) => {
+      if (e.pointerId !== drivePointerId) return;
+      onDriveEnd();
+    });
+
+    zoomZone.addEventListener('pointerdown', (e) => {
+      if (zoomPointerId !== null) return;
+      e.preventDefault();
+      e.stopPropagation();
+      zoomPointerId = e.pointerId;
+      zoomStartValue = camZoomFactor;
+      zoomZone.setPointerCapture(e.pointerId);
+      onZoomMove(e.clientX);
+    });
+    zoomZone.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== zoomPointerId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onZoomMove(e.clientX);
+    });
+    zoomZone.addEventListener('pointerup', (e) => {
+      if (e.pointerId !== zoomPointerId) return;
+      e.preventDefault();
+      zoomPointerId = null;
+    });
+    zoomZone.addEventListener('pointercancel', (e) => {
+      if (e.pointerId === zoomPointerId) zoomPointerId = null;
+    });
+
+    angleZone.addEventListener('pointerdown', (e) => {
+      if (anglePointerId !== null) return;
+      e.preventDefault();
+      e.stopPropagation();
+      anglePointerId = e.pointerId;
+      angleStartValue = bodyAimPitch / bodyAimMax;
+      angleZone.setPointerCapture(e.pointerId);
+      onAngleMove(e.clientY);
+    });
+    angleZone.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== anglePointerId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onAngleMove(e.clientY);
+    });
+    angleZone.addEventListener('pointerup', (e) => {
+      if (e.pointerId !== anglePointerId) return;
+      e.preventDefault();
+      onAngleEnd();
+    });
+    angleZone.addEventListener('pointercancel', (e) => {
+      if (e.pointerId === anglePointerId) onAngleEnd();
+    });
+
+    requestAnimationFrame(() => {
+      const zr = zoomZone.getBoundingClientRect();
+      const thumbPos = (camZoomFactor - ZOOM_MIN) / (ZOOM_MAX - ZOOM_MIN);
+      zoomThumb.style.left = `${2 + thumbPos * (zr.width - 44)}px`;
+      const angleVal = bodyAimPitch / bodyAimMax;
+      angleThumb.style.transform = `translate(-50%, ${-angleVal * 38}px)`;
+    });
 
     const JOYSTICK_RADIUS = 70;
     let joystickPointerId = null;
     let joystickCenter = { x: 0, y: 0 };
-
-    function updateKeysFromJoystick(dx, dy) {
-      const deadzone = 0.2;
-      const nx = Math.abs(dx) > deadzone ? dx : 0;
-      const ny = Math.abs(dy) > deadzone ? -dy : 0;
-      keys['KeyW'] = ny > 0;
-      keys['KeyS'] = ny < 0;
-      keys['KeyA'] = nx < 0;
-      keys['KeyD'] = nx > 0;
-    }
 
     function onJoystickMove(clientX, clientY) {
       const dx = (clientX - joystickCenter.x) / JOYSTICK_RADIUS;
       const dy = (clientY - joystickCenter.y) / JOYSTICK_RADIUS;
       const len = Math.sqrt(dx * dx + dy * dy);
       const clamped = len > 1 ? 1 / len : 1;
-      const sx = dx * clamped * JOYSTICK_RADIUS * 0.6;
-      const sy = dy * clamped * JOYSTICK_RADIUS * 0.6;
+      const deadzone = 0.15;
+      const mag = Math.min(1, len);
+      if (mag > deadzone) {
+        touchJoystickInput.dx = dx * clamped;
+        touchJoystickInput.dy = dy * clamped;
+      } else {
+        touchJoystickInput.dx = 0;
+        touchJoystickInput.dy = 0;
+      }
+      const sx = touchJoystickInput.dx * JOYSTICK_RADIUS * 0.6;
+      const sy = touchJoystickInput.dy * JOYSTICK_RADIUS * 0.6;
       joystickStick.style.transform = `translate(${sx}px, ${sy}px)`;
-      updateKeysFromJoystick(dx * clamped, dy * clamped);
     }
 
     function onJoystickEnd() {
       joystickPointerId = null;
       joystickStick.style.transform = 'translate(0, 0)';
-      keys['KeyW'] = keys['KeyS'] = keys['KeyA'] = keys['KeyD'] = false;
+      touchJoystickInput.dx = 0;
+      touchJoystickInput.dy = 0;
     }
 
     joystickZone.addEventListener('pointerdown', (e) => {
@@ -1156,13 +1323,6 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
       if (playerCharacter?.weapons?.[1]) requestWeaponSwitch(weaponMode === 1 ? 2 : 1);
     });
 
-    angleSlider.addEventListener('input', () => {
-      const v = parseFloat(angleSlider.value);
-      bodyAimPitch = v * bodyAimMax;
-    });
-    zoomSlider.addEventListener('input', () => {
-      camZoomFactor = parseFloat(zoomSlider.value);
-    });
   }
 
   if (!nextLevelBtnEl) {
@@ -1306,8 +1466,34 @@ function animate() {
 
   const pos = tankRigidBody ? tankRigidBody.translation() : { x: 0, y: 0, z: 0 };
 
-  const targetSpeed = (!playerDead && tankRigidBody && (isKeyForAction(keys, 'forward') ? playerMaxSpeed : isKeyForAction(keys, 'backward') ? -playerMaxSpeed : 0)) || 0;
-  const targetTurn = (!playerDead && tankRigidBody && (isKeyForAction(keys, 'turnLeft') ? maxTurnSpeed : isKeyForAction(keys, 'turnRight') ? -maxTurnSpeed : 0)) || 0;
+  // Mobile: joystick rotates tank, drive zone (drag up/down) controls speed. Desktop: keys.
+  const joystickActive = isTouchMode() && (touchJoystickInput.dx !== 0 || touchJoystickInput.dy !== 0);
+  const driveActive = isTouchMode() && touchDriveInput.value !== 0;
+  const targetSpeed = (!playerDead && tankRigidBody && (
+    driveActive ? touchDriveInput.value * playerMaxSpeed
+    : isKeyForAction(keys, 'forward') ? playerMaxSpeed
+    : isKeyForAction(keys, 'backward') ? -playerMaxSpeed
+    : 0
+  )) || 0;
+  let targetTurn;
+  if (joystickActive) {
+    const dx = touchJoystickInput.dx;
+    const dy = touchJoystickInput.dy;
+    const mag = Math.sqrt(dx * dx + dy * dy);
+    const desiredDir = mag > 0.001 ? new THREE.Vector3(-dx, 0, -dy).normalize() : null;
+    if (desiredDir && tankRigidBody && !playerDead) {
+      const rot = tankRigidBody.rotation();
+      const q = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+      const forwardXZ = new THREE.Vector3(forward.x, 0, forward.z).normalize();
+      const crossY = forwardXZ.x * desiredDir.z - forwardXZ.z * desiredDir.x;
+      targetTurn = Math.abs(crossY) > 0.05 ? Math.sign(crossY) * maxTurnSpeed * Math.min(1, mag * 1.5) : 0;
+    } else {
+      targetTurn = 0;
+    }
+  } else {
+    targetTurn = (!playerDead && tankRigidBody && (isKeyForAction(keys, 'turnLeft') ? maxTurnSpeed : isKeyForAction(keys, 'turnRight') ? -maxTurnSpeed : 0)) || 0;
+  }
 
   const isBoosting = !playerDead && isKeyForAction(keys, 'boost') && boostRemaining > 0 && boostCooldown <= 0;
   if (isBoosting) {
