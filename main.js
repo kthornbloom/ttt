@@ -778,15 +778,16 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   if (touchControlsEl) {
     bodyAimPitch = 0;
     camZoomFactor = 1;
+    touchDriveInput.value = 0;
     const zt = document.getElementById('touch-zoom-thumb');
     const at = document.getElementById('touch-angle-thumb');
-    const dz = document.getElementById('touch-drive-thumb');
+    const djs = document.getElementById('touch-joystick-drive-stick');
     if (zt) {
       const zr = document.getElementById('touch-zoom-zone')?.getBoundingClientRect();
       if (zr) zt.style.left = `${2 + (camZoomFactor - 0.25) / 3.75 * (zr.width - 44)}px`;
     }
     if (at) at.style.transform = 'translate(-50%, 0)';
-    if (dz) dz.style.transform = 'translate(-50%, 0)';
+    if (djs) djs.style.transform = 'translate(0, 0)';
   }
 
   // Cleanup previous level and game objects when re-initializing
@@ -1034,12 +1035,12 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   hudEl.innerHTML = `
     <div class="hud-left">
       <div class="hud-data" id="hud-weapon1">
-        <div class="hud-data-icon">◆</div>
+        <img src="${asset('/assets/icons/icon-shoot.svg')}" class="hud-data-icon" alt="">
         <div class="hud-data-name">Weapon 1</div>
         <div class="hud-data-detail">—</div>
       </div>
       <div class="hud-data" id="hud-weapon2">
-        <div class="hud-data-icon">◆</div>
+        <img src="${asset('/assets/icons/icon-shoot.svg')}" class="hud-data-icon" alt="">
         <div class="hud-data-name">Weapon 2</div>
         <div class="hud-data-detail">—</div>
       </div>
@@ -1047,12 +1048,12 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     <div class="hud-center"></div>
     <div class="hud-right">
       <div class="hud-data" id="hud-health">
-        <div class="hud-data-icon">♥</div>
+        <div class="hud-data-icon hud-data-icon-text">♥</div>
         <div class="hud-data-name">Health</div>
         <div class="hud-data-detail">100%</div>
       </div>
       <div class="hud-data" id="hud-angle">
-        <div class="hud-data-icon">∠</div>
+        <img src="${asset('/assets/icons/icon-angle.svg')}" class="hud-data-icon" alt="">
         <div class="hud-data-name">Angle</div>
         <div class="hud-data-detail">0°</div>
       </div>
@@ -1067,41 +1068,41 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
       <div class="touch-left">
         <div class="touch-zoom-zone" id="touch-zoom-zone" aria-label="Zoom">
           <div class="touch-zoom-track">
-            <div class="touch-zoom-thumb" id="touch-zoom-thumb"><span class="touch-control-icon" aria-hidden="true">🔍</span></div>
+            <div class="touch-zoom-thumb" id="touch-zoom-thumb"><img src="${asset('/assets/icons/icon-zoom.svg')}" class="touch-control-icon" alt="" aria-hidden="true"></div>
           </div>
         </div>
         <div class="touch-joystick-and-angle">
-          <div class="touch-joystick-zone" id="touch-joystick-zone">
+          <div class="touch-joystick-zone touch-joystick-drive" id="touch-joystick-drive" aria-label="Drive">
             <div class="touch-joystick-base">
-              <div class="touch-joystick-stick" id="touch-joystick-stick"><span class="touch-control-icon" aria-hidden="true">⊞</span></div>
+              <div class="touch-joystick-stick" id="touch-joystick-drive-stick"><img src="${asset('/assets/icons/icon-drive.svg')}" class="touch-control-icon" alt="" aria-hidden="true"></div>
             </div>
           </div>
           <div class="touch-angle-zone" id="touch-angle-zone" aria-label="Angle">
             <div class="touch-angle-track">
-              <div class="touch-angle-thumb" id="touch-angle-thumb"><span class="touch-control-icon touch-angle-icon" aria-hidden="true">∠</span></div>
+              <div class="touch-angle-thumb" id="touch-angle-thumb"><img src="${asset('/assets/icons/icon-angle.svg')}" class="touch-control-icon" alt="" aria-hidden="true"></div>
             </div>
           </div>
         </div>
       </div>
-      <div class="touch-buttons-right">
-        <div class="touch-fire-weapon-row">
-          <button class="touch-btn touch-btn-weapon" id="touch-btn-weapon" aria-label="Weapon">↻</button>
-          <button class="touch-btn touch-btn-fire" id="touch-btn-fire" aria-label="Fire">✺</button>
-        </div>
-        <div class="touch-drive-zone" id="touch-drive-zone" aria-label="Drive">
-          <div class="touch-drive-track">
-            <div class="touch-drive-thumb" id="touch-drive-thumb"><span class="touch-control-icon touch-drive-icon" aria-hidden="true">▲</span></div>
+      <div class="touch-right">
+        <div class="touch-joystick-zone touch-joystick-rotate" id="touch-joystick-zone" aria-label="Rotate">
+          <div class="touch-joystick-base">
+            <div class="touch-joystick-stick" id="touch-joystick-stick"><img src="${asset('/assets/icons/icon-arrows-all.svg')}" class="touch-control-icon" alt="" aria-hidden="true"></div>
           </div>
+        </div>
+        <div class="touch-buttons-near-joystick">
+          <button class="touch-btn touch-btn-weapon" id="touch-btn-weapon" aria-label="Weapon"><img src="${asset('/assets/icons/icon-swap.svg')}" class="touch-btn-icon" alt=""></button>
+          <button class="touch-btn touch-btn-fire" id="touch-btn-fire" aria-label="Fire"><img src="${asset('/assets/icons/icon-shoot.svg')}" class="touch-btn-icon" alt=""></button>
         </div>
       </div>
     `;
     touchControlsEl.style.touchAction = 'none';
     (gameContainer || document.body).appendChild(touchControlsEl);
 
+    const joystickDriveZone = document.getElementById('touch-joystick-drive');
+    const joystickDriveStick = document.getElementById('touch-joystick-drive-stick');
     const joystickZone = document.getElementById('touch-joystick-zone');
     const joystickStick = document.getElementById('touch-joystick-stick');
-    const driveZone = document.getElementById('touch-drive-zone');
-    const driveThumb = document.getElementById('touch-drive-thumb');
     const zoomZone = document.getElementById('touch-zoom-zone');
     const zoomThumb = document.getElementById('touch-zoom-thumb');
     const angleZone = document.getElementById('touch-angle-zone');
@@ -1109,14 +1110,14 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     const fireBtn = document.getElementById('touch-btn-fire');
     const weaponBtn = document.getElementById('touch-btn-weapon');
 
-    const DRIVE_DRAG_RANGE = 60;
+    const JOYSTICK_RADIUS = 70;
     const ZOOM_MIN = 0.25;
     const ZOOM_MAX = 4;
     const ZOOM_DEFAULT = 1;
     const ANGLE_RANGE = 1;
 
-    let drivePointerId = null;
-    let driveCenterY = 0;
+    let driveJoystickPointerId = null;
+    let driveJoystickCenter = { x: 0, y: 0 };
     let zoomPointerId = null;
     let zoomCenterX = 0;
     let zoomStartValue = 1;
@@ -1124,19 +1125,27 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     let angleCenterY = 0;
     let angleStartValue = 0;
 
-    function onDriveMove(clientY) {
-      const dy = driveCenterY - clientY;
-      const rawValue = dy / DRIVE_DRAG_RANGE;
-      const value = Math.max(-1, Math.min(1, rawValue));
-      touchDriveInput.value = value;
-      const thumbOffset = value * DRIVE_DRAG_RANGE * 0.85;
-      driveThumb.style.transform = `translate(-50%, ${-thumbOffset}px)`;
+    function onDriveJoystickMove(clientX, clientY) {
+      const dx = (clientX - driveJoystickCenter.x) / JOYSTICK_RADIUS;
+      const dy = (clientY - driveJoystickCenter.y) / JOYSTICK_RADIUS;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      const clamped = len > 1 ? 1 / len : 1;
+      const deadzone = 0.15;
+      const mag = Math.min(1, len);
+      if (mag > deadzone) {
+        touchDriveInput.value = -dy * clamped;
+      } else {
+        touchDriveInput.value = 0;
+      }
+      const sx = (mag > deadzone ? dx * clamped : 0) * JOYSTICK_RADIUS * 0.6;
+      const sy = (mag > deadzone ? dy * clamped : 0) * JOYSTICK_RADIUS * 0.6;
+      joystickDriveStick.style.transform = `translate(${sx}px, ${sy}px)`;
     }
 
-    function onDriveEnd() {
-      drivePointerId = null;
+    function onDriveJoystickEnd() {
+      driveJoystickPointerId = null;
       touchDriveInput.value = 0;
-      driveThumb.style.transform = 'translate(-50%, 0)';
+      joystickDriveStick.style.transform = 'translate(0, 0)';
     }
 
     function onZoomMove(clientX) {
@@ -1165,31 +1174,29 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
       anglePointerId = null;
     }
 
-    driveZone.addEventListener('pointerdown', (e) => {
-      if (drivePointerId !== null) return;
+    joystickDriveZone.addEventListener('pointerdown', (e) => {
+      if (driveJoystickPointerId !== null) return;
       e.preventDefault();
       e.stopPropagation();
-      drivePointerId = e.pointerId;
-      const rect = driveZone.getBoundingClientRect();
-      driveCenterY = rect.top + rect.height / 2;
-      driveZone.setPointerCapture(e.pointerId);
-      onDriveMove(e.clientY);
+      driveJoystickPointerId = e.pointerId;
+      const rect = joystickDriveZone.getBoundingClientRect();
+      driveJoystickCenter = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      joystickDriveZone.setPointerCapture(e.pointerId);
+      onDriveJoystickMove(e.clientX, e.clientY);
     });
-    driveZone.addEventListener('pointermove', (e) => {
-      if (e.pointerId !== drivePointerId) return;
+    joystickDriveZone.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== driveJoystickPointerId) return;
       e.preventDefault();
-      e.stopPropagation();
-      onDriveMove(e.clientY);
+      onDriveJoystickMove(e.clientX, e.clientY);
     });
-    driveZone.addEventListener('pointerup', (e) => {
-      if (e.pointerId !== drivePointerId) return;
+    joystickDriveZone.addEventListener('pointerup', (e) => {
+      if (e.pointerId !== driveJoystickPointerId) return;
       e.preventDefault();
-      e.stopPropagation();
-      onDriveEnd();
+      onDriveJoystickEnd();
     });
-    driveZone.addEventListener('pointercancel', (e) => {
-      if (e.pointerId !== drivePointerId) return;
-      onDriveEnd();
+    joystickDriveZone.addEventListener('pointercancel', (e) => {
+      if (e.pointerId !== driveJoystickPointerId) return;
+      onDriveJoystickEnd();
     });
 
     zoomZone.addEventListener('pointerdown', (e) => {
@@ -1248,7 +1255,6 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
       angleThumb.style.transform = `translate(-50%, ${-angleVal * 38}px)`;
     });
 
-    const JOYSTICK_RADIUS = 70;
     let joystickPointerId = null;
     let joystickCenter = { x: 0, y: 0 };
 
