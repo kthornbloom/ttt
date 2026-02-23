@@ -666,6 +666,29 @@
   }
 }
 
+/* Touchscreen: HUD at top so it doesn't overlap touch controls at bottom */
+.is-touchscreen .hud {
+  bottom: auto;
+  top: 0;
+  flex-direction: row;
+}
+.is-touchscreen .hud-data-icon {
+  display: none;
+}
+.is-touchscreen .hud-data-name {
+  font-size: 1rem;
+}
+.is-touchscreen .hud-left,
+.is-touchscreen .hud-right {
+  width: auto;
+  padding: 10px;
+  background: rgba(0,0,0,0.5);
+}
+.is-touchscreen .hud-left::before,
+.is-touchscreen .hud-right::before {
+  display: none;
+}
+
 
     /* Touch controls overlay – transparent gray design */
     .touch-controls {
@@ -766,11 +789,8 @@
       right: 0;
       bottom: 0;
       margin: 1.5rem;
-      width: 220px;
-      height: 140px;
     }
     .touch-joystick-rotate {
-      position: absolute;
       right: 0;
       bottom: 0;
       width: 140px;
@@ -778,7 +798,7 @@
     }
     .touch-buttons-near-joystick {
       position: absolute;
-      right: 148px;
+      right: calc(100% + 20px);
       bottom: 10px;
       display: flex;
       flex-direction: column;
@@ -845,6 +865,28 @@
       align-items: center;
       justify-content: center;
       pointer-events: none;
+    }
+
+    /* Tablet/iPad: scale down touch controls to prevent overlap (left ~196px + right ~220px + margins ~48px = ~464px needed) */
+    @media (max-width: 520px) {
+      .is-touchscreen .touch-left {
+        transform: scale(0.7);
+        transform-origin: bottom left;
+      }
+      .is-touchscreen .touch-right {
+        transform: scale(0.7);
+        transform-origin: bottom right;
+      }
+    }
+    @media (min-width: 521px) and (max-width: 900px) {
+      .is-touchscreen .touch-left {
+        transform: scale(0.85);
+        transform-origin: bottom left;
+      }
+      .is-touchscreen .touch-right {
+        transform: scale(0.85);
+        transform-origin: bottom right;
+      }
     }
 
     /* Controls modal */
@@ -968,6 +1010,12 @@
       .volume-controls { display: none !important; }
     }
   </style>
+  <script>
+    (function() {
+      var hasTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+      if (hasTouch) document.documentElement.classList.add('is-touchscreen');
+    })();
+  </script>
 </head>
 <body>
   <div id="splash">
