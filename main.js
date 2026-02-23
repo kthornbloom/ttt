@@ -1564,12 +1564,13 @@ function animate() {
   }
 
   if (tankMesh) tankMesh.updateMatrixWorld(true);
-  // Use turret-height source for tip: prefer fallback/body (Weapon-* may be at floor in some models like tank-04)
-  const barrelForTip = fallbackBarrel || bodyGroup || weaponBarrels['cannon'] || barrelGroup;
-  const dirSource = barrelGroup || barrelForTip;
+  // Use active barrel for tip; laser/minigun may be at floor so use cannon/fallback for heat beam origin
+  const heatBeamWeaponSelected = heatBeamW && isHeatBeamWeapon(heatBeamW);
+  const cannonBarrel = weaponBarrels['cannon'];
+  const barrelForTip = heatBeamWeaponSelected ? (cannonBarrel || fallbackBarrel || bodyGroup || barrelGroup) : barrelGroup;
   const barrelTip = barrelForTip && tankMesh ? new THREE.Vector3(0, 0, -0.5).applyMatrix4(barrelForTip.matrixWorld) : new THREE.Vector3(posFinal.x, posFinal.y, posFinal.z);
-  const fireForward = dirSource && tankMesh
-    ? new THREE.Vector3(0, 0, -1).clone().transformDirection(dirSource.matrixWorld)
+  const fireForward = (barrelGroup || barrelForTip) && tankMesh
+    ? new THREE.Vector3(0, 0, -1).clone().transformDirection((barrelGroup || barrelForTip).matrixWorld)
     : new THREE.Vector3(0, 0, -1);
   if (muzzleLight) muzzleLight.position.copy(barrelTip).addScaledVector(fireForward.clone().normalize(), 1.5);
 
