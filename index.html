@@ -182,6 +182,8 @@
       padding: 1rem 2rem 2rem;
       overflow-y: auto;
       position: relative;
+      width: 100vw;
+      max-width: 100%;
     }
 
     #level-select:not(.hidden) { display: flex; }
@@ -208,13 +210,10 @@
     #level-select-logo img { width: 100%; height: auto; display: block; }
 
     .level-grid {
-      display: grid;
-      grid-template-columns: repeat(5, 1fr);
-      gap: 1rem;
-      max-width: 600px;
-    }
-    @media (max-width: 500px) {
-      .level-grid { grid-template-columns: repeat(2, 1fr); }
+      display: flex;
+      max-width: 1000px;
+      flex-wrap: wrap;
+      gap: 1em;
     }
 
     .level-card {
@@ -225,9 +224,24 @@
       cursor: pointer;
       background: black;
       padding: 0.5rem;
-      border: 2px solid white;
+      position: relative;
     }
-    .level-card:hover { opacity: 0.9; }
+
+    .level-card:hover::after {
+      content: '';
+      width: 100%;
+      height: 100%;
+      background: repeating-linear-gradient(135deg, #751f0000 0 10px, #ffffff 10px 20px);
+      position: absolute;
+      top: -10px;
+      left: -10px;
+      opacity: .5;
+      z-index: -1;
+      animation: glitch .4s infinite;
+      z-index: -1;
+      mix-blend-mode: overlay;
+    }
+
     .level-card.locked {
       cursor: not-allowed;
       opacity: 0.5;
@@ -244,6 +258,8 @@
       justify-content: center;
       color: rgba(255,255,255,0.3);
       font-size: 2rem;
+      width: 300px;
+      aspect-ratio: 3/2;
     }
 
     .level-card-name {
@@ -266,9 +282,59 @@
       border-radius: 0;
       padding: 0.75rem 2rem;
       cursor: pointer;
+      position: relative;
     }
 
-    button:hover { opacity: 0.9; }
+    button:hover::after {
+      content: '';
+      width: 100%;
+      height: 100%;
+      background: repeating-linear-gradient(135deg, #751f0000 0 10px, #bd0000 10px 20px);
+      position: absolute;
+      top: -10px;
+      left: -10px;
+      opacity: .5;
+      z-index: -1;
+      animation: glitch .4s infinite;
+      z-index: 1;
+      mix-blend-mode: overlay;
+    }
+
+    @keyframes glitch {
+      0% {
+        transform:translate(2px, -4px);
+      }
+      10% {
+        transform:translate(2px, -4px);
+      }
+      20% {
+        transform:translate(4px, -1px);
+      }
+      30% {
+        transform:translate(4px, -1px);
+      }
+      40% {
+        transform:translate(-2px, 3px);
+      }
+      50% {
+        transform:translate(-2px, 3px);
+      }
+      60% {
+        transform:translate(4px, -1px);
+      }
+      70% {
+        transform:translate(4px, -1px);
+      }
+      80% {
+        transform:translate(4px, -1px);
+      }
+      90% {
+        transform:translate(4px, -1px);
+      }
+      100% {
+        transform:translate(2px, -4px);
+      }
+    }
 
     #game-container {
       display: none;

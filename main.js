@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { getLevelGlbPath, getNextLevelId, markDefeated } from './levels.js';
-import { goToMainMenu } from './splash.js';
 import { getCharacterGlbPath, getCharacterById } from './characters.js';
 
 // Resolve asset paths for both local dev (/) and GitHub Pages (/ttt/)
@@ -85,6 +84,11 @@ const enemyShootCooldown = 10;
 const enemyAimThreshold = 0.92;
 const enemyStuckDist = 2;
 const enemyStuckTime = 0.8;
+const turretLaserRange = 15;
+const turretLaserDuration = 0.5;
+const turretLaserCooldown = 6;
+const turretLaserDamagePerTick = 2;
+const turretLaserDamageInterval = 0.05;
 // ───────────────────────────────────────────────────────────────────────────
 
 function getWeapon(mode) {
@@ -182,6 +186,7 @@ let impactFlash = null;
 let mgLine = null;
 let cannonTrajectoryLine = null;
 let cannonTrajectoryEndSphere = null;
+let empRadiusMarker = null;
 let laserTrajectoryLine = null;
 let muzzleLight = null;
 let laserHitLight = null;
@@ -198,6 +203,8 @@ let enemyDead = false;
 let lastLaserDamageTime = 0;
 /** @type {Array<{rigidBody:*,mesh:*,body:*,barrel:*,wFL:*,wFR:*,wBL:*,wBR:*,collider:*,health:number,cannonCooldown:number,engineTime:number,stuckTimer:number,lastPos:{x,y,z},knockbackVel:{x,y,z},hitFlashUntil:number}>} */
 let enemies = [];
+/** @type {Array<{mesh:*,base:*,head:*,rigidBody:*,collider:*,health:number,laserCooldown:number,laserShootingUntil:number,hitFlashUntil:number}>} */
+let turrets = [];
 let explosionPieces = [];
 let lastCamTarget = { x: 0, y: 2, z: 0 };
 let trajectoryBarrelTip = new THREE.Vector3(0, 0, 0);
@@ -222,6 +229,7 @@ let engineSource = null;
 let engineBuffer = null;
 let engineGain = null;
 let hissBuffer = null;
+let empBuffer = null;
 let laserBuffer = null;
 let minigunBuffer = null;
 let shootBuffer = null;
@@ -233,6 +241,7 @@ let thudBuffer = null;
 let winSpeechBuffers = [];
 let lossSpeechBuffers = [];
 let thudCooldown = 0;
+let wallHittingLastFrame = false;
 let winSpeechPlayed = false;
 let lossSpeechPlayed = false;
 let currentLevelId = 'level-01';
@@ -246,6 +255,7 @@ let nextLevelBtnEl = null;
 let lossOverlayEl = null;
 let youWinOverlayEl = null;
 let animateLoopStarted = false;
+let gameActive = false;
 
 async function loadAudio(url) {
   try {
@@ -264,8 +274,9 @@ async function loadEngineSound() {
 }
 
 async function loadWeaponSounds() {
-  [hissBuffer, laserBuffer, minigunBuffer, shootBuffer, reloadBuffer] = await Promise.all([
+  [hissBuffer, empBuffer, laserBuffer, minigunBuffer, shootBuffer, reloadBuffer] = await Promise.all([
     loadAudio(asset('/assets/audio/hiss.mp3')),
+    loadAudio(asset('/assets/audio/emp.mp3')),
     loadAudio(asset('/assets/audio/laser.mp3')),
     loadAudio(asset('/assets/audio/minigun.mp3')),
     loadAudio(asset('/assets/audio/shot.mp3')),
@@ -350,8 +361,10 @@ function takeDamage(rigidBody, currentHealth, damage, weaponType, impactDir, kno
   if (!rigidBody || currentHealth <= 0) return currentHealth;
   const newHealth = Math.max(0, currentHealth - damage);
   if (weaponType === 'primary' && impactDir && knockbackVelRef) {
-    const len = Math.sqrt(impactDir.x ** 2 + impactDir.y ** 2 + impactDir.z ** 2) || 0.001;
-    const dx = impactDir.x / len, dy = impactDir.y / len, dz = impactDir.z / len;
+    // Project knockback onto horizontal plane to prevent tanks flying into the sky on slopes
+    const hx = impactDir.x, hz = impactDir.z;
+    const hLen = Math.sqrt(hx * hx + hz * hz) || 0.001;
+    const dx = hx / hLen, dy = 0, dz = hz / hLen;
     knockbackVelRef.x += dx * knockbackMagnitude;
     knockbackVelRef.y += dy * knockbackMagnitude;
     knockbackVelRef.z += dz * knockbackMagnitude;
@@ -421,6 +434,47 @@ function createEnemyTank(tankTemplate, spawnPos = { x: 15, y: 2, z: 15 }, spawnR
   };
 }
 
+function createTurret(turretTemplate, spawnPos = { x: 10, y: 0, z: 10 }, spawnRot = null) {
+  const turret = turretTemplate.clone();
+  turret.traverse((c) => {
+    if (c.isMesh) {
+      c.material = c.material?.clone();
+      if (c.material?.color) c.material.color.multiplyScalar(0.6);
+    }
+  });
+  const base = turret.getObjectByName('Base');
+  const head = turret.getObjectByName('Head');
+  const pos = spawnPos instanceof THREE.Vector3 ? spawnPos : { x: spawnPos.x, y: spawnPos.y ?? 0, z: spawnPos.z };
+  turret.position.set(pos.x, pos.y, pos.z);
+  if (spawnRot && (spawnRot instanceof THREE.Quaternion || spawnRot.w !== undefined)) {
+    turret.quaternion.copy(spawnRot instanceof THREE.Quaternion ? spawnRot : new THREE.Quaternion(spawnRot.x, spawnRot.y, spawnRot.z, spawnRot.w));
+  }
+  const collider = RAPIER.ColliderDesc.cylinder(1, 1.2);
+  const rb = world.createRigidBody(
+    RAPIER.RigidBodyDesc.fixed()
+  );
+  rb.setTranslation({ x: pos.x, y: pos.y + 1, z: pos.z }, true);
+  if (spawnRot && (spawnRot instanceof THREE.Quaternion || spawnRot.w !== undefined)) {
+    rb.setRotation(spawnRot instanceof THREE.Quaternion ? { x: spawnRot.x, y: spawnRot.y, z: spawnRot.z, w: spawnRot.w } : spawnRot, true);
+  }
+  world.createCollider(collider, rb);
+  const laserGeo = new LineGeometry();
+  const laserMat = new LineMaterial({
+    color: 0xff4444,
+    linewidth: 0.15,
+    worldUnits: true,
+    resolution: new THREE.Vector2(innerWidth, innerHeight)
+  });
+  const laserLine = new Line2(laserGeo, laserMat);
+  laserLine.visible = false;
+  scene.add(laserLine);
+  scene.add(turret);
+  return {
+    mesh: turret, base, head, rigidBody: rb, collider, laserLine,
+    health: enemyHealthMax, laserCooldown: 0, laserShootingUntil: 0, hitFlashUntil: 0
+  };
+}
+
 function explodeTank(mesh, rigidBody) {
   if (!mesh) return;
   const pieces = [];
@@ -451,6 +505,7 @@ const SPAWN_NAMES = {
   player: 'Spawn_Player',
   enemyTank: 'Spawn_Enemy_Tank',
   enemyTurret: 'Spawn_Enemy_Turret',
+  turret: 'Spawn_Turret',
   health: 'Spawn_Health'
 };
 
@@ -465,7 +520,7 @@ function collectSpawnPoints(level) {
     } else if (c.name.startsWith(SPAWN_NAMES.enemyTank)) {
       spawns.enemyTank.push({ position: c.getWorldPosition(new THREE.Vector3()), rotation: c.getWorldQuaternion(new THREE.Quaternion()) });
       toRemove.push(c);
-    } else if (c.name.startsWith(SPAWN_NAMES.enemyTurret)) {
+    } else if (c.name.startsWith(SPAWN_NAMES.enemyTurret) || c.name.startsWith(SPAWN_NAMES.turret)) {
       spawns.enemyTurret.push({ position: c.getWorldPosition(new THREE.Vector3()), rotation: c.getWorldQuaternion(new THREE.Quaternion()) });
       toRemove.push(c);
     } else if (c.name.startsWith(SPAWN_NAMES.health)) {
@@ -496,7 +551,18 @@ function geometryToRapier(geometry, matrix) {
   return { vertices, indices };
 }
 
+function stopGame() {
+  gameActive = false;
+  animateLoopStarted = false;
+  if (engineSource) {
+    try { engineSource.stop(); } catch (_) {}
+    engineSource = null;
+  }
+  stopHeatBeamSound();
+}
+
 async function init(levelId = 'level-01', tankId = 'tank-01') {
+  gameActive = true;
   currentLevelId = levelId;
   currentTankId = tankId;
   playerCharacter = await getCharacterById(tankId);
@@ -541,12 +607,14 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   fireEMPPending = false;
   laserHoleCooldown = 0;
   thudCooldown = 0;
+  wallHittingLastFrame = false;
   lastLaserDamageTime = 0;
   playerKnockbackVel = { x: 0, y: 0, z: 0 };
   impactFlashAge = -1;
   tankRigidBody = null;
   tankMesh = null;
   enemies = [];
+  turrets = [];
   Object.keys(keys).forEach((k) => (keys[k] = false));
   if (nextLevelBtnEl) nextLevelBtnEl.classList.add('hidden');
   if (lossOverlayEl) lossOverlayEl.classList.add('hidden');
@@ -570,7 +638,7 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   const spawns = collectSpawnPoints(level);
   const playerPos = spawns.player?.position ?? new THREE.Vector3(0, 2, 0);
   const playerRot = spawns.player?.rotation ?? new THREE.Quaternion();
-  const enemySpawns = spawns.enemyTank.length > 0 ? spawns.enemyTank : [{ position: { x: 15, y: 2, z: 15 } }];
+  const enemySpawns = spawns.enemyTank;
 
   level.traverse((c) => {
     if (c.isMesh && !c.name.startsWith('Spawn_')) {
@@ -640,10 +708,25 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
 
   scene.add(tankMesh);
 
+  if (enemySpawns.length > 0) {
   const enemyGlb = await loader.loadAsync(asset('/assets/characters/tank-badguy.glb'));
   for (const spawn of enemySpawns) {
     const enemyData = createEnemyTank(enemyGlb.scene, spawn.position, spawn.rotation);
     enemies.push(enemyData);
+  }
+  }
+
+  if (spawns.enemyTurret.length > 0) {
+    try {
+      const turretGlb = await loader.loadAsync(asset('/assets/characters/turret.glb'));
+      turretGlb.scene.traverse((c) => { if (c.isMesh) c.castShadow = c.receiveShadow = true; });
+      for (const spawn of spawns.enemyTurret) {
+        const turretData = createTurret(turretGlb.scene, spawn.position, spawn.rotation);
+        turrets.push(turretData);
+      }
+    } catch (e) {
+      console.warn('Turret model not found, skipping turret spawns:', e.message);
+    }
   }
 
   await loadEngineSound();
@@ -731,6 +814,13 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   );
   cannonTrajectoryEndSphere.visible = false;
   scene.add(cannonTrajectoryEndSphere);
+  empRadiusMarker = new THREE.Mesh(
+    new THREE.RingGeometry(0.98, 1, 64),
+    new THREE.MeshBasicMaterial({ color: 0x4488ff, transparent: true, opacity: trajectoryPreviewOpacity * 2, side: THREE.DoubleSide, depthWrite: false })
+  );
+  empRadiusMarker.rotation.x = -Math.PI / 2;
+  empRadiusMarker.visible = false;
+  scene.add(empRadiusMarker);
   laserTrajectoryLine = new Line2(new LineGeometry(), laserTrajMat);
   laserTrajectoryLine.visible = false;
   scene.add(laserTrajectoryLine);
@@ -814,8 +904,7 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     const menuBtn = document.createElement('button');
     menuBtn.textContent = 'Main Menu';
     menuBtn.addEventListener('click', () => {
-      lossOverlayEl.classList.add('hidden');
-      goToMainMenu();
+      location.reload();
     });
     lossOverlayEl.append(retryBtn, menuBtn);
     document.body.appendChild(lossOverlayEl);
@@ -828,8 +917,7 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     const menuBtn = document.createElement('button');
     menuBtn.textContent = 'Main Menu';
     menuBtn.addEventListener('click', () => {
-      youWinOverlayEl.classList.add('hidden');
-      goToMainMenu();
+      location.reload();
     });
     youWinOverlayEl.appendChild(menuBtn);
     document.body.appendChild(youWinOverlayEl);
@@ -843,6 +931,7 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     if (mgLine?.material?.resolution) mgLine.material.resolution.set(innerWidth, innerHeight);
     if (cannonTrajectoryLine?.material?.resolution) cannonTrajectoryLine.material.resolution.set(innerWidth, innerHeight);
     if (laserTrajectoryLine?.material?.resolution) laserTrajectoryLine.material.resolution.set(innerWidth, innerHeight);
+    turrets.forEach((t) => { if (t.laserLine?.material?.resolution) t.laserLine.material.resolution.set(innerWidth, innerHeight); });
 
     // keep blur consistent on resize
     hTilt.uniforms.h.value = 1 / innerWidth * 2.0;
@@ -878,13 +967,15 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
 }
 
 function animate() {
+  if (!gameActive) return;
   requestAnimationFrame(animate);
   const dt = 0.016;
 
   if (tankRigidBody) updateEngineSound();
 
   const anyEnemyAlive = enemies.some((e) => e.rigidBody && e.health > 0);
-  if (!tankRigidBody && !anyEnemyAlive) {
+  const anyTurretAlive = turrets.some((t) => t.rigidBody && t.health > 0);
+  if (!tankRigidBody && !anyEnemyAlive && !anyTurretAlive) {
     for (const p of explosionPieces) {
       p.mesh.position.addScaledVector(p.vel, dt);
       p.mesh.rotation.x += p.rotVel.x * dt;
@@ -973,21 +1064,23 @@ function animate() {
     }
   }
 
-  // Wall collision thud: when moving and hitting static geometry
-  if (!playerDead && tankRigidBody && thudCooldown <= 0 && Math.abs(currentSpeed) > 1) {
+  // Wall collision thud: when moving and hitting static geometry (only on first impact, not while continually pressing)
+  if (!playerDead && tankRigidBody && Math.abs(currentSpeed) > 1) {
     const fwdDir = currentSpeed > 0 ? forward : forward.clone().negate();
     const fwdRay = new RAPIER.Ray(
       { x: pos.x + fwdDir.x * 0.5, y: pos.y, z: pos.z + fwdDir.z * 0.5 },
       { x: fwdDir.x, y: 0, z: fwdDir.z }
     );
     const fwdHit = world.castRay(fwdRay, 2.5, true, null, null, null, tankRigidBody);
-    const hitEnemy = fwdHit && enemies.some((e) => e.rigidBody && fwdHit.collider.parent() === e.rigidBody);
-    if (fwdHit && !hitEnemy) {
+    const hitEnemy = fwdHit && (enemies.some((e) => e.rigidBody && fwdHit.collider.parent() === e.rigidBody) || turrets.some((t) => t.rigidBody && fwdHit.collider.parent() === t.rigidBody));
+    const hittingWall = fwdHit && !hitEnemy;
+    if (hittingWall && !wallHittingLastFrame) {
       playOnce(thudBuffer);
-      thudCooldown = 0.4;
     }
+    wallHittingLastFrame = hittingWall;
+  } else {
+    wallHittingLastFrame = false;
   }
-  if (thudCooldown > 0) thudCooldown -= dt;
   }
 
   const now = performance.now() / 1000;
@@ -1094,6 +1187,73 @@ function animate() {
     }
   }
 
+  for (const t of turrets) {
+    if (!t.mesh || !t.rigidBody || t.health <= 0) continue;
+    t.mesh.updateMatrixWorld(true);
+    const headPos = t.head ? t.head.getWorldPosition(new THREE.Vector3()) : new THREE.Vector3(t.rigidBody.translation().x, t.rigidBody.translation().y, t.rigidBody.translation().z);
+    const pPos = tankRigidBody ? tankRigidBody.translation() : { x: headPos.x, y: headPos.y, z: headPos.z };
+    const toPlayer = new THREE.Vector3(pPos.x - headPos.x, 0, pPos.z - headPos.z);
+    const dist = toPlayer.length();
+    if (dist < 0.01) continue;
+    toPlayer.normalize();
+    if (t.head) {
+      const targetAngle = Math.atan2(toPlayer.x, -toPlayer.z);
+      const turnSpeed = 6 * dt;
+      let angleDiff = targetAngle - t.head.rotation.y;
+      while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+      while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+      t.head.rotation.y += Math.sign(angleDiff) * Math.min(Math.abs(angleDiff), turnSpeed);
+    }
+    const enemyDisabled = now < enemyDisabledUntil;
+    t.laserCooldown = Math.max(0, t.laserCooldown - dt);
+    t.laserShootingUntil = Math.max(0, t.laserShootingUntil - dt);
+    const inRange = dist <= turretLaserRange && tankRigidBody && !playerDead;
+    const canStartShot = inRange && !enemyDisabled && t.laserCooldown <= 0 && t.laserShootingUntil <= 0;
+    if (canStartShot) {
+      t.laserShootingUntil = turretLaserDuration;
+      t.laserCooldown = turretLaserCooldown;
+      if (laserBuffer) {
+        const src = audioCtx.createBufferSource();
+        src.buffer = laserBuffer;
+        src.connect(audioCtx.destination);
+        src.start(0);
+        setTimeout(() => src.stop(), turretLaserDuration * 1000);
+      }
+    }
+    const isShooting = t.laserShootingUntil > 0;
+    if (isShooting && t.head && t.laserLine) {
+      const headTip = new THREE.Vector3(0, 0, 0.5).applyMatrix4(t.head.matrixWorld);
+      const headForward = new THREE.Vector3(0, 0, 1).applyQuaternion(t.head.getWorldQuaternion(new THREE.Quaternion()));
+      const ray = new RAPIER.Ray(
+        { x: headTip.x, y: headTip.y, z: headTip.z },
+        { x: headForward.x, y: headForward.y, z: headForward.z }
+      );
+      const hit = world.castRayAndGetNormal(ray, turretLaserRange, true, null, null, null, t.rigidBody);
+      const end = hit ? Math.min(turretLaserRange, hit.toi) : turretLaserRange;
+      t.laserLine.geometry.setPositions([headTip.x, headTip.y, headTip.z, headTip.x + headForward.x * end, headTip.y + headForward.y * end, headTip.z + headForward.z * end]);
+      t.laserLine.geometry.attributes.position.needsUpdate = true;
+      t.laserLine.visible = true;
+      if (hit && hit.collider.parent() === tankRigidBody && (now - (t._lastTurretLaserDamage || 0)) >= turretLaserDamageInterval) {
+        t._lastTurretLaserDamage = now;
+        playerHealth = takeDamage(tankRigidBody, playerHealth, turretLaserDamagePerTick, 'secondary', null, null);
+        playerHitFlashUntil = now + 0.12;
+        if (playerHealth <= 0) {
+          playerDead = true;
+          playOnce(explodeBuffer);
+          explosionPieces.push(...explodeTank(tankMesh, tankRigidBody));
+          tankMesh = null;
+          tankRigidBody = null;
+          if (!lossSpeechPlayed) {
+            lossSpeechPlayed = true;
+            setTimeout(() => playRandomFrom(lossSpeechBuffers), 1000);
+          }
+        }
+      }
+    } else if (t.laserLine) {
+      t.laserLine.visible = false;
+    }
+  }
+
   world.step();
 
   const posFinal = tankRigidBody ? tankRigidBody.translation() : { x: 0, y: 0, z: 0 };
@@ -1119,7 +1279,7 @@ function animate() {
       playOnce(explodeBuffer);
       explosionPieces.push(...explodeTank(e.mesh, e.rigidBody));
       enemies.splice(i, 1);
-      if (enemies.length === 0 && !winSpeechPlayed) {
+      if (enemies.length === 0 && turrets.length === 0 && !winSpeechPlayed) {
         enemyDead = true;
         winSpeechPlayed = true;
         markDefeated(currentLevelId);
@@ -1139,6 +1299,16 @@ function animate() {
       if (!e.rigidBody || e.health <= 0) continue;
       const ePos = e.rigidBody.translation();
       const dx = ePos.x - w.pos.x, dz = ePos.z - w.pos.z;
+      const dist = Math.sqrt(dx * dx + dz * dz);
+      if (dist <= w.radius) {
+        enemyDisabledUntil = now + w.disableDuration;
+        break;
+      }
+    }
+    for (const t of turrets) {
+      if (!t.rigidBody || t.health <= 0) continue;
+      const tPos = t.rigidBody.translation();
+      const dx = tPos.x - w.pos.x, dz = tPos.z - w.pos.z;
       const dist = Math.sqrt(dx * dx + dz * dz);
       if (dist <= w.radius) {
         enemyDisabledUntil = now + w.disableDuration;
@@ -1214,6 +1384,39 @@ function animate() {
       const baseBounce = 0.05 * Math.sin(e.engineTime);
       const hitShake = e.hitJolt * Math.sin(e.engineTime * 12);
       e.body.position.y = baseBounce + hitShake;
+    }
+  }
+
+  for (const t of turrets) {
+    if (!t.mesh || !t.rigidBody || t.health <= 0) continue;
+    const enemyDisabled = now < enemyDisabledUntil;
+    const turretHitFlashing = now < t.hitFlashUntil;
+    if (turretHitFlashing) {
+      const flashT = 1 - (t.hitFlashUntil - now) / 0.12;
+      const flashIntensity = 0.8 * (1 - flashT);
+      t.mesh.traverse((c) => {
+        if (c.isMesh && c.material) {
+          const m = Array.isArray(c.material) ? c.material[0] : c.material;
+          if (m.emissive) m.emissive.setHex(0xff0000);
+          if (m.emissiveIntensity !== undefined) m.emissiveIntensity = flashIntensity;
+        }
+      });
+    } else if (enemyDisabled) {
+      t.mesh.traverse((c) => {
+        if (c.isMesh && c.material) {
+          const m = Array.isArray(c.material) ? c.material[0] : c.material;
+          if (m.emissive) m.emissive.setHex(0x2244aa);
+          if (m.emissiveIntensity !== undefined) m.emissiveIntensity = 0.3;
+        }
+      });
+    } else {
+      t.mesh.traverse((c) => {
+        if (c.isMesh && c.material) {
+          const m = Array.isArray(c.material) ? c.material[0] : c.material;
+          if (m.emissive) m.emissive.setHex(0x000000);
+          if (m.emissiveIntensity !== undefined) m.emissiveIntensity = 0;
+        }
+      });
     }
   }
 
@@ -1318,7 +1521,10 @@ function animate() {
     playOnce(shootBuffer);
     playOnce(reloadBuffer);
     const linVel = tankRigidBody.linvel();
-    const angleRad = (mortarW.launchAngle ?? 75) * Math.PI / 180;
+    // Body aim pitch: negative = lean forward (flatter shot, farther), positive = lean back (steeper arc, closer)
+    const baseAngle = mortarW.launchAngle ?? 75;
+    const effectiveLaunchAngle = Math.max(35, Math.min(100, baseAngle + bodyAimPitch * 50));
+    const angleRad = effectiveLaunchAngle * Math.PI / 180;
     const fwd = fireForward.clone().normalize();
     const up = new THREE.Vector3(0, 1, 0);
     const launchDir = new THREE.Vector3().addVectors(
@@ -1354,14 +1560,13 @@ function animate() {
     const duration = w2.disableDuration ?? 4;
     const expandSpeed = range / 1.5;
     const mesh = new THREE.Mesh(
-      new THREE.RingGeometry(0.49, 0.5, 32),
+      new THREE.SphereGeometry(0.5, 32, 16),
       new THREE.MeshBasicMaterial({ color: 0x4488ff, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false })
     );
     mesh.position.set(posFinal.x, posFinal.y + 0.5, posFinal.z);
-    mesh.rotation.x = -Math.PI / 2;
     scene.add(mesh);
     empWaves.push({ pos: { x: posFinal.x, y: posFinal.y + 0.5, z: posFinal.z }, radius: 0, maxRadius: range, expandSpeed, disableDuration: duration, mesh });
-    playOnce(hissBuffer);
+    playOnce(empBuffer);
   }
   if (fireFlash && fireFlash.visible) {
     fireFlash.material.opacity = (fireFlash.material.opacity ?? 1) - 8 * dt;
@@ -1398,8 +1603,18 @@ function animate() {
     const trajW = getWeapon(weaponMode);
     const showProjectileTrajectory = trajW && isProjectileWeapon(trajW);
     const showHeatBeamTrajectory = trajW && isHeatBeamWeapon(trajW);
+    const showEmpRadius = trajW?.type === 'emp';
 
-    if (showProjectileTrajectory) {
+    if (showEmpRadius && empRadiusMarker) {
+      cannonTrajectoryLine.visible = false;
+      if (cannonTrajectoryEndSphere) cannonTrajectoryEndSphere.visible = false;
+      laserTrajectoryLine.visible = false;
+      const range = trajW.range ?? 15;
+      empRadiusMarker.position.set(posFinal.x, posFinal.y + 3, posFinal.z);
+      empRadiusMarker.scale.setScalar(range);
+      empRadiusMarker.visible = true;
+    } else if (showProjectileTrajectory) {
+      if (empRadiusMarker) empRadiusMarker.visible = false;
       cannonTrajectoryLine.visible = true;
       laserTrajectoryLine.visible = false;
       const mortarOrigin = trajW.type === 'mortar'
@@ -1409,7 +1624,11 @@ function animate() {
       if (trajectoryBarrelTip.distanceTo(mortarOrigin) > 5) trajectoryBarrelTip.copy(mortarOrigin);
       const linVel = tankRigidBody.linvel();
       const spd = trajW.speed ?? cannonSpeed;
-      const angleRad = (trajW.launchAngle ?? 0) * Math.PI / 180;
+      const baseAngle = trajW.type === 'mortar' ? (trajW.launchAngle ?? 75) : 0;
+      const effectiveAngle = trajW.type === 'mortar'
+        ? Math.max(35, Math.min(100, baseAngle + bodyAimPitch * 50))
+        : baseAngle;
+      const angleRad = effectiveAngle * Math.PI / 180;
       const up = new THREE.Vector3(0, 1, 0);
       const launchDir = angleRad > 0
         ? new THREE.Vector3().addVectors(fd.clone().multiplyScalar(Math.cos(angleRad)), up.clone().multiplyScalar(Math.sin(angleRad))).normalize()
@@ -1452,6 +1671,7 @@ function animate() {
       cannonTrajectoryEndSphere.position.set(posArr[lastIdx], posArr[lastIdx + 1], posArr[lastIdx + 2]);
       cannonTrajectoryEndSphere.visible = true;
     } else if (showHeatBeamTrajectory) {
+      if (empRadiusMarker) empRadiusMarker.visible = false;
       cannonTrajectoryLine.visible = false;
       if (cannonTrajectoryEndSphere) cannonTrajectoryEndSphere.visible = false;
       const beamRangeTraj = heatBeamW?.range ?? mgRange;
@@ -1470,11 +1690,13 @@ function animate() {
       cannonTrajectoryLine.visible = false;
       if (cannonTrajectoryEndSphere) cannonTrajectoryEndSphere.visible = false;
       laserTrajectoryLine.visible = false;
+      if (empRadiusMarker) empRadiusMarker.visible = false;
     }
   } else {
     if (cannonTrajectoryLine) cannonTrajectoryLine.visible = false;
     if (cannonTrajectoryEndSphere) cannonTrajectoryEndSphere.visible = false;
     if (laserTrajectoryLine) laserTrajectoryLine.visible = false;
+    if (empRadiusMarker) empRadiusMarker.visible = false;
   }
 
   if (cannonCooldown > 0) cannonCooldown = Math.max(0, cannonCooldown - dt);
@@ -1513,6 +1735,7 @@ function animate() {
       if (hit) {
         const hitParent = hit.collider.parent();
         const hitEnemy = cb.owner === 'player' && !enemyDead ? enemies.find((e) => e.rigidBody && hitParent === e.rigidBody) : null;
+        const hitTurret = cb.owner === 'player' ? turrets.find((t) => t.rigidBody && hitParent === t.rigidBody) : null;
         if (hitEnemy && hitEnemy.health > 0) {
           hitEnemy.health = takeDamage(hitEnemy.rigidBody, hitEnemy.health, cb.damage ?? cannonDamage, 'primary', dir, hitEnemy.knockbackVel, cb.knockback ?? cannonKnockbackImpulse);
           hitEnemy.hitFlashUntil = now + 0.12;
@@ -1521,7 +1744,24 @@ function animate() {
             playOnce(explodeBuffer);
             explosionPieces.push(...explodeTank(hitEnemy.mesh, hitEnemy.rigidBody));
             enemies = enemies.filter((x) => x !== hitEnemy);
-            if (enemies.length === 0) {
+            if (enemies.length === 0 && turrets.length === 0) {
+              enemyDead = true;
+              if (!winSpeechPlayed) {
+                winSpeechPlayed = true;
+                markDefeated(currentLevelId);
+                setTimeout(() => playRandomFrom(winSpeechBuffers), 1000);
+              }
+            }
+          }
+        } else if (hitTurret && hitTurret.health > 0) {
+          hitTurret.health = takeDamage(hitTurret.rigidBody, hitTurret.health, cb.damage ?? cannonDamage, 'primary', dir, { x: 0, y: 0, z: 0 }, cb.knockback ?? cannonKnockbackImpulse);
+          hitTurret.hitFlashUntil = now + 0.12;
+          if (hitTurret.health <= 0) {
+            playOnce(explodeBuffer);
+            explosionPieces.push(...explodeTank(hitTurret.mesh, hitTurret.rigidBody));
+            if (hitTurret.laserLine) scene.remove(hitTurret.laserLine);
+            turrets = turrets.filter((x) => x !== hitTurret);
+            if (enemies.length === 0 && turrets.length === 0) {
               enemyDead = true;
               if (!winSpeechPlayed) {
                 winSpeechPlayed = true;
@@ -1583,7 +1823,36 @@ function animate() {
                     playOnce(explodeBuffer);
                     explosionPieces.push(...explodeTank(e.mesh, e.rigidBody));
                     enemies = enemies.filter((x) => x !== e);
-                    if (enemies.length === 0) {
+                    if (enemies.length === 0 && turrets.length === 0) {
+                      enemyDead = true;
+                      if (!winSpeechPlayed) {
+                        winSpeechPlayed = true;
+                        markDefeated(currentLevelId);
+                        setTimeout(() => playRandomFrom(winSpeechBuffers), 1000);
+                      }
+                    }
+                  }
+                }
+              }
+              for (const t of turrets) {
+                if (!t.rigidBody || t.health <= 0) continue;
+                const tPos = t.rigidBody.translation();
+                const dx = tPos.x - hitPoint.x, dy = tPos.y - hitPoint.y, dz = tPos.z - hitPoint.z;
+                const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                if (d < splashR) {
+                  const tVal = d / splashR;
+                  const damageMult = 1 - tVal * (1 - falloff);
+                  const splashDmg = (cb.damage ?? cannonDamage) * damageMult;
+                  const splashKnock = (cb.knockback ?? cannonKnockbackImpulse) * damageMult;
+                  const sDir = splashDir(tPos, d);
+                  t.health = takeDamage(t.rigidBody, t.health, splashDmg, 'primary', sDir, { x: 0, y: 0, z: 0 }, splashKnock);
+                  t.hitFlashUntil = now + 0.12;
+                  if (t.health <= 0) {
+                    playOnce(explodeBuffer);
+                    explosionPieces.push(...explodeTank(t.mesh, t.rigidBody));
+                    if (t.laserLine) scene.remove(t.laserLine);
+                    turrets = turrets.filter((x) => x !== t);
+                    if (enemies.length === 0 && turrets.length === 0) {
                       enemyDead = true;
                       if (!winSpeechPlayed) {
                         winSpeechPlayed = true;
@@ -1666,6 +1935,7 @@ function animate() {
       laserHitLight.intensity = isMinigun ? 10 * Math.max(0.3, strobe) : 8;
       const hitParent = hit?.collider?.parent?.();
       const hitEnemyLaser = !enemyDead ? enemies.find((e) => e.rigidBody && hitParent === e.rigidBody) : null;
+      const hitTurretLaser = turrets.find((t) => t.rigidBody && hitParent === t.rigidBody);
       if (hitEnemyLaser && hitEnemyLaser.health > 0 && (now - lastLaserDamageTime) >= beamDamageInterval) {
         lastLaserDamageTime = now;
         hitEnemyLaser.health = takeDamage(hitEnemyLaser.rigidBody, hitEnemyLaser.health, beamDamagePerTick, 'secondary', null, null);
@@ -1675,7 +1945,7 @@ function animate() {
           playOnce(explodeBuffer);
           explosionPieces.push(...explodeTank(hitEnemyLaser.mesh, hitEnemyLaser.rigidBody));
           enemies = enemies.filter((x) => x !== hitEnemyLaser);
-          if (enemies.length === 0) {
+          if (enemies.length === 0 && turrets.length === 0) {
             enemyDead = true;
             if (!winSpeechPlayed) {
               winSpeechPlayed = true;
@@ -1685,7 +1955,26 @@ function animate() {
           }
         }
       }
-      const hitAnyEnemy = hit && enemies.some((e) => e.rigidBody && hit.collider.parent() === e.rigidBody);
+      if (hitTurretLaser && hitTurretLaser.health > 0 && (now - lastLaserDamageTime) >= beamDamageInterval) {
+        lastLaserDamageTime = now;
+        hitTurretLaser.health = takeDamage(hitTurretLaser.rigidBody, hitTurretLaser.health, beamDamagePerTick, 'secondary', null, null);
+        hitTurretLaser.hitFlashUntil = now + 0.12;
+          if (hitTurretLaser.health <= 0) {
+          playOnce(explodeBuffer);
+          explosionPieces.push(...explodeTank(hitTurretLaser.mesh, hitTurretLaser.rigidBody));
+          if (hitTurretLaser.laserLine) scene.remove(hitTurretLaser.laserLine);
+          turrets = turrets.filter((x) => x !== hitTurretLaser);
+          if (enemies.length === 0 && turrets.length === 0) {
+            enemyDead = true;
+            if (!winSpeechPlayed) {
+              winSpeechPlayed = true;
+              markDefeated(currentLevelId);
+              setTimeout(() => playRandomFrom(winSpeechBuffers), 1000);
+            }
+          }
+        }
+      }
+      const hitAnyEnemy = hit && (enemies.some((e) => e.rigidBody && hit.collider.parent() === e.rigidBody) || turrets.some((t) => t.rigidBody && hit.collider.parent() === t.rigidBody));
       if (hit && !hitAnyEnemy && (laserHoleCooldown -= dt) <= 0) {
         laserHoleCooldown = 0.1;
         const hitPoint = new THREE.Vector3(
@@ -1781,8 +2070,10 @@ function animate() {
   }
 
   if (tankRigidBody) lastCamTarget = tankRigidBody.translation();
-  else if (enemies.length > 0) {
-    const alive = enemies.find((e) => e.rigidBody && e.health > 0);
+  else if (enemies.length > 0 || turrets.length > 0) {
+    const aliveEnemy = enemies.find((e) => e.rigidBody && e.health > 0);
+    const aliveTurret = turrets.find((t) => t.rigidBody && t.health > 0);
+    const alive = aliveEnemy || aliveTurret;
     if (alive) lastCamTarget = alive.rigidBody.translation();
   }
   const camTarget = lastCamTarget;
