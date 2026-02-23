@@ -9,6 +9,7 @@ const asset = (path) => import.meta.env.BASE_URL + path.replace(/^\//, '');
 import { getLevels } from './levels.js';
 import { getCharacters } from './characters.js';
 import { initTankPreview, setTankCharacter, setTankPreviewWeapon, destroyTankPreview } from './tank-preview.js';
+import { setInputModeFromPointerEvent } from './input-mode.js';
 
 let selectedTankId = 'tank-01';
 let characters = [];
@@ -203,6 +204,7 @@ async function onStartClick() {
 
 function initSplash() {
   const startBtn = document.getElementById('start-btn');
+  startBtn.addEventListener('pointerdown', (e) => setInputModeFromPointerEvent(e), { capture: true });
   startBtn.addEventListener('click', onStartClick);
   startBtn.addEventListener('mouseenter', playQuickClick);
 }

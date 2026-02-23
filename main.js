@@ -1,6 +1,9 @@
 import * as THREE from 'three';
 import { getLevelGlbPath, getNextLevelId, markDefeated } from './levels.js';
 import { getCharacterGlbPath, getCharacterById } from './characters.js';
+import { isTouchMode } from './input-mode.js';
+import { loadKeybindings, getActionForKey, isKeyForAction } from './keybindings.js';
+import { showControlsIfFirstLevel01, showControlsModal, isControlsModalOpen } from './controls-modal.js';
 
 // Resolve asset paths for both local dev (/) and GitHub Pages (/ttt/)
 const asset = (path) => import.meta.env.BASE_URL + path.replace(/^\//, '');
@@ -325,6 +328,7 @@ let laserTrajectoryLine = null;
 let muzzleLight = null;
 let laserHitLight = null;
 let hudEl = null;
+let touchControlsEl = null;
 let fireCannonPending = false;
 let fireMortarPending = false;
 let fireEMPPending = false;
@@ -585,7 +589,7 @@ function createTurret(turretTemplate, spawnPos = { x: 10, y: 0, z: 10 }, spawnRo
   if (spawnRot && (spawnRot instanceof THREE.Quaternion || spawnRot.w !== undefined)) {
     turret.quaternion.copy(spawnRot instanceof THREE.Quaternion ? spawnRot : new THREE.Quaternion(spawnRot.x, spawnRot.y, spawnRot.z, spawnRot.w));
   }
-  const collider = RAPIER.ColliderDesc.cylinder(1, 1.2);
+  const collider = RAPIER.ColliderDesc.cylinder(1, 1.6);
   const rb = world.createRigidBody(
     RAPIER.RigidBodyDesc.fixed()
   );
@@ -698,6 +702,7 @@ function stopGame() {
 }
 
 async function init(levelId = 'level-01', tankId = 'tank-01') {
+  loadKeybindings();
   gameActive = true;
   currentLevelId = levelId;
   currentTankId = tankId;
@@ -762,6 +767,13 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   if (youWinOverlayEl) youWinOverlayEl.classList.add('hidden');
   escapePauseActive = false;
   camZoomFactor = 1;
+
+  if (touchControlsEl) {
+    const angleSl = document.getElementById('touch-slider-angle');
+    const zoomSl = document.getElementById('touch-slider-zoom');
+    if (angleSl) angleSl.value = 0;
+    if (zoomSl) zoomSl.value = 1;
+  }
 
   // Cleanup previous level and game objects when re-initializing
   const lights = scene.children.filter((c) => c.isLight);
@@ -1034,6 +1046,125 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   `;
   document.body.appendChild(hudEl);
 
+  if (isTouchMode() && !touchControlsEl) {
+    touchControlsEl = document.createElement('div');
+    touchControlsEl.className = 'touch-controls';
+    touchControlsEl.innerHTML = `
+      <div class="touch-joystick-zone" id="touch-joystick-zone">
+        <div class="touch-joystick-base">
+          <div class="touch-joystick-stick" id="touch-joystick-stick"></div>
+        </div>
+      </div>
+      <div class="touch-buttons-right">
+        <button class="touch-btn touch-btn-fire" id="touch-btn-fire">FIRE</button>
+        <button class="touch-btn touch-btn-weapon" id="touch-btn-weapon">WPN</button>
+      </div>
+      <div class="touch-sliders">
+        <div class="touch-slider-row">
+          <label>∠</label>
+          <input type="range" class="touch-slider touch-slider-angle" id="touch-slider-angle" min="-1" max="1" step="0.02" value="0">
+        </div>
+        <div class="touch-slider-row">
+          <label>🔍</label>
+          <input type="range" class="touch-slider touch-slider-zoom" id="touch-slider-zoom" min="0.25" max="4" step="0.05" value="1">
+        </div>
+      </div>
+    `;
+    touchControlsEl.style.touchAction = 'none';
+    (gameContainer || document.body).appendChild(touchControlsEl);
+
+    const joystickZone = document.getElementById('touch-joystick-zone');
+    const joystickStick = document.getElementById('touch-joystick-stick');
+    const fireBtn = document.getElementById('touch-btn-fire');
+    const weaponBtn = document.getElementById('touch-btn-weapon');
+    const angleSlider = document.getElementById('touch-slider-angle');
+    const zoomSlider = document.getElementById('touch-slider-zoom');
+
+    const JOYSTICK_RADIUS = 70;
+    let joystickPointerId = null;
+    let joystickCenter = { x: 0, y: 0 };
+
+    function updateKeysFromJoystick(dx, dy) {
+      const deadzone = 0.2;
+      const nx = Math.abs(dx) > deadzone ? dx : 0;
+      const ny = Math.abs(dy) > deadzone ? -dy : 0;
+      keys['KeyW'] = ny > 0;
+      keys['KeyS'] = ny < 0;
+      keys['KeyA'] = nx < 0;
+      keys['KeyD'] = nx > 0;
+    }
+
+    function onJoystickMove(clientX, clientY) {
+      const dx = (clientX - joystickCenter.x) / JOYSTICK_RADIUS;
+      const dy = (clientY - joystickCenter.y) / JOYSTICK_RADIUS;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      const clamped = len > 1 ? 1 / len : 1;
+      const sx = dx * clamped * JOYSTICK_RADIUS * 0.6;
+      const sy = dy * clamped * JOYSTICK_RADIUS * 0.6;
+      joystickStick.style.transform = `translate(${sx}px, ${sy}px)`;
+      updateKeysFromJoystick(dx * clamped, dy * clamped);
+    }
+
+    function onJoystickEnd() {
+      joystickPointerId = null;
+      joystickStick.style.transform = 'translate(0, 0)';
+      keys['KeyW'] = keys['KeyS'] = keys['KeyA'] = keys['KeyD'] = false;
+    }
+
+    joystickZone.addEventListener('pointerdown', (e) => {
+      if (joystickPointerId !== null) return;
+      e.preventDefault();
+      joystickPointerId = e.pointerId;
+      const rect = joystickZone.getBoundingClientRect();
+      joystickCenter = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      joystickZone.setPointerCapture(e.pointerId);
+      onJoystickMove(e.clientX, e.clientY);
+    });
+    joystickZone.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== joystickPointerId) return;
+      e.preventDefault();
+      onJoystickMove(e.clientX, e.clientY);
+    });
+    joystickZone.addEventListener('pointerup', (e) => {
+      if (e.pointerId !== joystickPointerId) return;
+      e.preventDefault();
+      onJoystickEnd();
+    });
+    joystickZone.addEventListener('pointercancel', (e) => {
+      if (e.pointerId !== joystickPointerId) return;
+      onJoystickEnd();
+    });
+
+    fireBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      keys['Space'] = true;
+      const w1 = getWeapon(1);
+      const w2 = getWeapon(2);
+      const canFireProjectile = !playerDead && weaponMode === 1 && w1 && isProjectileWeapon(w1) && cannonAmmo > 0 && cannonCooldown <= 0;
+      const canFireMortar = !playerDead && weaponMode === 2 && w2?.type === 'mortar' && cannonAmmo > 0 && weapon2Cooldown <= 0;
+      const canFireEMP = !playerDead && weaponMode === 2 && w2?.type === 'emp' && weapon2Cooldown <= 0;
+      if (canFireProjectile || canFireMortar || canFireEMP) barrelRecoil = 1;
+      if (canFireProjectile) fireCannonPending = true;
+      if (canFireMortar) fireMortarPending = true;
+      if (canFireEMP) fireEMPPending = true;
+    });
+    fireBtn.addEventListener('pointerup', (e) => { e.preventDefault(); keys['Space'] = false; });
+    fireBtn.addEventListener('pointerleave', () => { keys['Space'] = false; });
+
+    weaponBtn.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      if (playerCharacter?.weapons?.[1]) requestWeaponSwitch(weaponMode === 1 ? 2 : 1);
+    });
+
+    angleSlider.addEventListener('input', () => {
+      const v = parseFloat(angleSlider.value);
+      bodyAimPitch = v * bodyAimMax;
+    });
+    zoomSlider.addEventListener('input', () => {
+      camZoomFactor = parseFloat(zoomSlider.value);
+    });
+  }
+
   if (!nextLevelBtnEl) {
     nextLevelBtnEl = document.createElement('button');
     nextLevelBtnEl.textContent = 'Next Level';
@@ -1055,12 +1186,15 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
       lossOverlayEl.classList.add('hidden');
       init(currentLevelId, currentTankId);
     });
+    const controlsBtn = document.createElement('button');
+    controlsBtn.textContent = 'Controls';
+    controlsBtn.addEventListener('click', () => showControlsModal());
     const menuBtn = document.createElement('button');
     menuBtn.textContent = 'Main Menu';
     menuBtn.addEventListener('click', () => {
       location.reload();
     });
-    lossOverlayEl.append(retryBtn, menuBtn);
+    lossOverlayEl.append(retryBtn, controlsBtn, menuBtn);
     document.body.appendChild(lossOverlayEl);
   }
 
@@ -1068,12 +1202,15 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     youWinOverlayEl = document.createElement('div');
     youWinOverlayEl.classList.add('you-win-overlay', 'hidden');
     youWinOverlayEl.innerHTML = '<div class="you-win-text">YOU WIN</div>';
+    const controlsBtn = document.createElement('button');
+    controlsBtn.textContent = 'Controls';
+    controlsBtn.addEventListener('click', () => showControlsModal());
     const menuBtn = document.createElement('button');
     menuBtn.textContent = 'Main Menu';
     menuBtn.addEventListener('click', () => {
       location.reload();
     });
-    youWinOverlayEl.appendChild(menuBtn);
+    youWinOverlayEl.append(controlsBtn, menuBtn);
     document.body.appendChild(youWinOverlayEl);
   }
 
@@ -1095,8 +1232,10 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   document.addEventListener('click', () => { if (audioCtx.state === 'suspended') audioCtx.resume(); }, { once: true });
   document.addEventListener('keydown', (e) => {
     if (audioCtx.state === 'suspended') audioCtx.resume();
+    if (isControlsModalOpen()) return;
     keys[e.code] = true;
-    if (e.code === 'Space') {
+    const action = getActionForKey(e.code);
+    if (action === 'fire') {
       e.preventDefault();
       const w1 = getWeapon(1);
       const w2 = getWeapon(2);
@@ -1109,17 +1248,17 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
       if (canFireMortar) fireMortarPending = true;
       if (canFireEMP) fireEMPPending = true;
     }
-    if (e.code === 'Digit1') requestWeaponSwitch(1);
-    if (e.code === 'Digit2' && playerCharacter?.weapons?.[1]) requestWeaponSwitch(2);
-    if (e.code === 'Minus' || e.code === 'NumpadSubtract') {
+    if (action === 'weapon1') requestWeaponSwitch(1);
+    if (action === 'weapon2' && playerCharacter?.weapons?.[1]) requestWeaponSwitch(2);
+    if (action === 'zoomIn') {
       e.preventDefault();
       camZoomFactor = Math.min(4, camZoomFactor * 2);
     }
-    if (e.code === 'Equal' || e.code === 'NumpadAdd') {
+    if (action === 'zoomOut') {
       e.preventDefault();
       camZoomFactor = Math.max(0.25, camZoomFactor * 0.5);
     }
-    if (e.code === 'Escape') {
+    if (action === 'pause') {
       e.preventDefault();
       const gameVisible = !document.getElementById('game-container')?.classList.contains('hidden');
       if (gameVisible && lossOverlayEl) {
@@ -1134,6 +1273,8 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     }
   });
   document.addEventListener('keyup', (e) => (keys[e.code] = false));
+
+  showControlsIfFirstLevel01(!isTouchMode(), levelId);
 
   if (!animateLoopStarted) {
     animateLoopStarted = true;
@@ -1165,10 +1306,10 @@ function animate() {
 
   const pos = tankRigidBody ? tankRigidBody.translation() : { x: 0, y: 0, z: 0 };
 
-  const targetSpeed = (!playerDead && tankRigidBody && (keys['KeyW'] ? playerMaxSpeed : keys['KeyS'] ? -playerMaxSpeed : 0)) || 0;
-  const targetTurn = (!playerDead && tankRigidBody && (keys['KeyA'] ? maxTurnSpeed : keys['KeyD'] ? -maxTurnSpeed : 0)) || 0;
+  const targetSpeed = (!playerDead && tankRigidBody && (isKeyForAction(keys, 'forward') ? playerMaxSpeed : isKeyForAction(keys, 'backward') ? -playerMaxSpeed : 0)) || 0;
+  const targetTurn = (!playerDead && tankRigidBody && (isKeyForAction(keys, 'turnLeft') ? maxTurnSpeed : isKeyForAction(keys, 'turnRight') ? -maxTurnSpeed : 0)) || 0;
 
-  const isBoosting = !playerDead && (keys['ShiftLeft'] || keys['ShiftRight']) && boostRemaining > 0 && boostCooldown <= 0;
+  const isBoosting = !playerDead && isKeyForAction(keys, 'boost') && boostRemaining > 0 && boostCooldown <= 0;
   if (isBoosting) {
     boostRemaining = Math.max(0, boostRemaining - dt);
     if (boostRemaining <= 0) boostCooldown = boostCooldownTime;
@@ -1185,10 +1326,10 @@ function animate() {
   currentTurnSpeed += (targetTurn - currentTurnSpeed) * Math.min(1, turnRate * dt);
 
   if (!playerDead && tankRigidBody) {
-    if (keys['ShiftRight']) {
+    if (isKeyForAction(keys, 'resetAim')) {
       bodyAimPitch = 0;
     } else {
-      const aimDelta = (keys['ArrowDown'] ? 1 : 0) - (keys['ArrowUp'] ? 1 : 0);
+      const aimDelta = (isKeyForAction(keys, 'aimDown') ? 1 : 0) - (isKeyForAction(keys, 'aimUp') ? 1 : 0);
       bodyAimPitch = Math.max(-bodyAimMax, Math.min(bodyAimMax, bodyAimPitch + aimDelta * bodyAimSpeed * dt));
     }
   }
@@ -1712,7 +1853,7 @@ function animate() {
   }
 
   const heatBeamW = getWeapon(weaponMode);
-  const heatBeamActive = heatBeamW && isHeatBeamWeapon(heatBeamW) && keys['Space'] && mgHeat < (heatBeamW.heatMax ?? 1) && !mgOverheated;
+  const heatBeamActive = heatBeamW && isHeatBeamWeapon(heatBeamW) && isKeyForAction(keys, 'fire') && mgHeat < (heatBeamW.heatMax ?? 1) && !mgOverheated;
   if (barrelGroup && !playerDead && tankMesh && weaponSwitchPhase === 'idle') {
     if (!heatBeamActive) {
       barrelRecoil = Math.max(0, barrelRecoil - recoilSpeed * dt);
@@ -1933,7 +2074,7 @@ function animate() {
       if (cannonTrajectoryEndSphere) cannonTrajectoryEndSphere.visible = false;
       const beamRangeTraj = heatBeamW?.range ?? mgRange;
       const beamHeatMaxTraj = heatBeamW?.heatMax ?? mgHeatMax;
-      const showLaserPreview = !keys['Space'] || mgHeat >= beamHeatMaxTraj || mgOverheated;
+      const showLaserPreview = !isKeyForAction(keys, 'fire') || mgHeat >= beamHeatMaxTraj || mgOverheated;
       if (showLaserPreview) {
         laserTrajectoryLine.visible = true;
         const end = new THREE.Vector3(barrelTip.x + fd.x * beamRangeTraj, barrelTip.y + fd.y * beamRangeTraj, barrelTip.z + fd.z * beamRangeTraj);
@@ -2154,7 +2295,7 @@ function animate() {
     return true;
   });
 
-  const wantsToFireHeatBeam = !playerDead && heatBeamW && isHeatBeamWeapon(heatBeamW) && keys['Space'];
+  const wantsToFireHeatBeam = !playerDead && heatBeamW && isHeatBeamWeapon(heatBeamW) && isKeyForAction(keys, 'fire');
   const beamHeatMax = heatBeamW?.heatMax ?? mgHeatMax;
   const beamHeatRate = heatBeamW?.heatRate ?? mgHeatRate;
   const beamCoolRate = heatBeamW?.coolRate ?? mgCoolRate;
