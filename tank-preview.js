@@ -30,6 +30,13 @@ const TOP_MOUNTED_RETRACT_OFFSET = 0.5;
 
 const barrelDefaults = new WeakMap();
 
+/** Barrel extent along local +Z (back toward turret). Used to offset position so scale origin is at back. */
+function getBarrelZBackExtent(barrel) {
+  const box = new THREE.Box3().setFromObject(barrel);
+  box.applyMatrix4(barrel.matrixWorld.clone().invert());
+  return Math.max(0, box.max.z);
+}
+
 function isTopMountedWeapon(type) {
   return type === 'emp' || type === 'mortar';
 }
@@ -181,9 +188,17 @@ async function loadTank(character) {
   const weaponObjs = collectAllWeaponBarrels(tankMesh);
   const fallbackBarrel = tankMesh.getObjectByName('Barrel');
   const allBarrels = [...new Set([...weaponObjs, fallbackBarrel])].filter(Boolean);
+  tankMesh.scale.setScalar(1.4);
+  tankMesh.rotation.y = Math.PI;
+  tankMesh.position.set(0, DROP_START_Y, 0);
+  scene.add(tankMesh);
+  tankMesh.updateMatrixWorld(true);
   allBarrels.forEach((b) => {
     b.visible = false;
-    if (!barrelDefaults.has(b)) barrelDefaults.set(b, { scale: b.scale.clone(), y: b.position.y });
+    if (!barrelDefaults.has(b)) {
+      const zBack = getBarrelZBackExtent(b);
+      barrelDefaults.set(b, { scale: b.scale.clone(), y: b.position.y, z: b.position.z, zBack });
+    }
   });
 
   previewWeaponIndex = 0;
@@ -195,14 +210,11 @@ async function loadTank(character) {
   const toShow = primaryBarrel || fallbackBarrel;
   if (toShow) {
     toShow.visible = true;
-    toShow.scale.setScalar(1);
+    toShow.scale.set(1, 1, 1);
+    const def = barrelDefaults.get(toShow);
+    if (!isTopMountedWeapon(primaryType) && def?.z !== undefined) toShow.position.z = def.z;
     if (isTopMountedWeapon(primaryType)) toShow.position.y = getTopMountedExtendedY(toShow);
   }
-
-  tankMesh.scale.setScalar(1.4);
-  tankMesh.rotation.y = Math.PI;
-  tankMesh.position.set(0, DROP_START_Y, 0);
-  scene.add(tankMesh);
 
   dropAnimationProgress = 0;
   dropImpactPlayed = false;
@@ -232,8 +244,14 @@ function requestWeaponSwitch(targetIndex) {
     return;
   }
 
-  if (!barrelDefaults.has(fromBarrel)) barrelDefaults.set(fromBarrel, { scale: fromBarrel.scale.clone(), y: fromBarrel.position.y });
-  if (!barrelDefaults.has(toBarrel)) barrelDefaults.set(toBarrel, { scale: toBarrel.scale.clone(), y: toBarrel.position.y });
+  if (!barrelDefaults.has(fromBarrel)) {
+    const zBack = getBarrelZBackExtent(fromBarrel);
+    barrelDefaults.set(fromBarrel, { scale: fromBarrel.scale.clone(), y: fromBarrel.position.y, z: fromBarrel.position.z, zBack });
+  }
+  if (!barrelDefaults.has(toBarrel)) {
+    const zBack = getBarrelZBackExtent(toBarrel);
+    barrelDefaults.set(toBarrel, { scale: toBarrel.scale.clone(), y: toBarrel.position.y, z: toBarrel.position.z, zBack });
+  }
 
   weaponSwitchTargetIndex = targetIndex;
   weaponSwitchFromBarrel = fromBarrel;
@@ -307,7 +325,10 @@ function animate() {
             const extY = getTopMountedExtendedY(from);
             from.position.y = extY - TOP_MOUNTED_RETRACT_OFFSET * ease(t);
           } else {
-            from.scale.setScalar(1 - ease(t));
+            const s = 1 - ease(t);
+            from.scale.set(1, 1, s);
+            const zBack = def?.zBack ?? 0;
+            from.position.z = (def?.z ?? from.position.z) + zBack * (1 - s);
           }
         }
         if (t >= 1) {
@@ -317,7 +338,10 @@ function animate() {
           if (isTopMountedWeapon(weaponSwitchToType)) {
             to.position.y = getTopMountedRetractedY(to);
           } else {
-            to.scale.setScalar(0);
+            to.scale.set(1, 1, 0);
+            const defTo = barrelDefaults.get(to);
+            const zBack = defTo?.zBack ?? 0;
+            to.position.z = (defTo?.z ?? to.position.z) + zBack;
           }
           weaponSwitchPhase = 'extending';
           weaponSwitchT = 0;
@@ -330,12 +354,16 @@ function animate() {
             const retY = getTopMountedRetractedY(to);
             to.position.y = retY + TOP_MOUNTED_RETRACT_OFFSET * ease(t);
           } else {
-            to.scale.setScalar(ease(t));
+            const s = ease(t);
+            to.scale.set(1, 1, s);
+            const zBack = def?.zBack ?? 0;
+            to.position.z = (def?.z ?? to.position.z) + zBack * (1 - s);
           }
         }
         if (t >= 1) {
           if (to) {
-            to.scale.setScalar(1);
+            to.scale.set(1, 1, 1);
+            if (!isTopMountedWeapon(weaponSwitchToType) && def?.z !== undefined) to.position.z = def.z;
             if (isTopMountedWeapon(weaponSwitchToType)) to.position.y = getTopMountedExtendedY(to);
           }
           previewWeaponIndex = weaponSwitchTargetIndex;

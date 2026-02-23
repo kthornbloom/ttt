@@ -186,7 +186,9 @@ function setActiveWeaponBarrel(mode) {
     barrelGroup = active;
     barrelDefaultZ = active.position.z;
     // Reset scale/position in case we're coming out of an animation
-    active.scale.setScalar(1);
+    active.scale.set(1, 1, 1);
+    const def = barrelDefaults.get(active);
+    if (!isTopMountedWeapon(w?.type) && def?.z !== undefined) active.position.z = def.z;
     if (isTopMountedWeapon(w?.type)) active.position.y = getTopMountedExtendedY(active);
   } else {
     barrelGroup = null;
@@ -195,6 +197,13 @@ function setActiveWeaponBarrel(mode) {
 
 /** Store default scale/position per barrel for animation. */
 const barrelDefaults = new WeakMap();
+
+/** Barrel extent along local +Z (back toward turret). Used to offset position so scale origin is at back. */
+function getBarrelZBackExtent(barrel) {
+  const box = new THREE.Box3().setFromObject(barrel);
+  box.applyMatrix4(barrel.matrixWorld.clone().invert());
+  return Math.max(0, box.max.z);
+}
 
 /** Request weapon switch with barrel animation. Starts retract, then extend. */
 function requestWeaponSwitch(targetMode) {
@@ -213,12 +222,16 @@ function requestWeaponSwitch(targetMode) {
     return;
   }
 
-  // Ensure defaults are stored
+  // Ensure defaults are stored (include z/zBack for barrel/cannon position-offset animation)
   if (!barrelDefaults.has(fromBarrel)) {
-    barrelDefaults.set(fromBarrel, { scale: fromBarrel.scale.clone(), y: fromBarrel.position.y });
+    tankMesh?.updateMatrixWorld(true);
+    const zBack = getBarrelZBackExtent(fromBarrel);
+    barrelDefaults.set(fromBarrel, { scale: fromBarrel.scale.clone(), y: fromBarrel.position.y, z: fromBarrel.position.z, zBack });
   }
   if (!barrelDefaults.has(toBarrel)) {
-    barrelDefaults.set(toBarrel, { scale: toBarrel.scale.clone(), y: toBarrel.position.y });
+    tankMesh?.updateMatrixWorld(true);
+    const zBack = getBarrelZBackExtent(toBarrel);
+    barrelDefaults.set(toBarrel, { scale: toBarrel.scale.clone(), y: toBarrel.position.y, z: toBarrel.position.z, zBack });
   }
 
   weaponSwitchTargetMode = targetMode;
@@ -862,8 +875,13 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     const obj = findWeaponBarrel(tankMesh, type) || findBarrelInList(weaponObjs, type);
     if (obj) weaponBarrels[type] = obj;
   }
+  scene.add(tankMesh);
+  tankMesh.updateMatrixWorld(true);
   [fallbackBarrel, ...Object.values(weaponBarrels), ...weaponObjs].filter(Boolean).forEach((b) => {
-    if (!barrelDefaults.has(b)) barrelDefaults.set(b, { scale: b.scale.clone(), y: b.position.y });
+    if (!barrelDefaults.has(b)) {
+      const zBack = getBarrelZBackExtent(b);
+      barrelDefaults.set(b, { scale: b.scale.clone(), y: b.position.y, z: b.position.z, zBack });
+    }
   });
   setActiveWeaponBarrel(1);
 
@@ -896,8 +914,6 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   world.createCollider(tankCollider, tankRigidBody);
   tankRigidBody.setTranslation({ x: playerPos.x, y: playerPos.y, z: playerPos.z }, true);
   tankRigidBody.setRotation({ x: playerRot.x, y: playerRot.y, z: playerRot.z, w: playerRot.w }, true);
-
-  scene.add(tankMesh);
 
   if (enemySpawns.length > 0) {
   const enemyGlb = await loader.loadAsync(asset('/assets/characters/tank-badguy.glb'));
@@ -2113,8 +2129,11 @@ function animate() {
           const extY = getTopMountedExtendedY(from);
           from.position.y = extY - topMountedRetractOffset * ease(t);
         } else {
+          // Scale only along barrel length (Z); offset position so back stays fixed (retracts into tank)
           const s = 1 - ease(t);
-          from.scale.setScalar(s);
+          from.scale.set(1, 1, s);
+          const zBack = def.zBack ?? 0;
+          from.position.z = (def.z ?? from.position.z) + zBack * (1 - s);
         }
       }
       if (t >= 1) {
@@ -2124,7 +2143,10 @@ function animate() {
         if (isTopMountedWeapon(weaponSwitchToType)) {
           to.position.y = getTopMountedRetractedY(to);
         } else {
-          to.scale.setScalar(0);
+          to.scale.set(1, 1, 0);
+          const defTo = barrelDefaults.get(to);
+          const zBack = defTo?.zBack ?? 0;
+          to.position.z = (defTo?.z ?? to.position.z) + zBack;
         }
         weaponSwitchPhase = 'extending';
         weaponSwitchT = 0;
@@ -2139,12 +2161,16 @@ function animate() {
           const retY = getTopMountedRetractedY(to);
           to.position.y = retY + topMountedRetractOffset * ease(t);
         } else {
-          to.scale.setScalar(ease(t));
+          const s = ease(t);
+          to.scale.set(1, 1, s);
+          const zBack = def?.zBack ?? 0;
+          to.position.z = (def?.z ?? to.position.z) + zBack * (1 - s);
         }
       }
       if (t >= 1) {
         if (to) {
-          to.scale.setScalar(1);
+          to.scale.set(1, 1, 1);
+          if (!isTopMountedWeapon(weaponSwitchToType) && def?.z !== undefined) to.position.z = def.z;
           if (isTopMountedWeapon(weaponSwitchToType)) to.position.y = getTopMountedExtendedY(to);
         }
         weaponMode = weaponSwitchTargetMode;
