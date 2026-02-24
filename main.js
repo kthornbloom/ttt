@@ -40,7 +40,8 @@ const accelRate = 1;
 const decelRateForward = 1;
 const decelRateTurn = 5;
 const boostDuration = 2;
-const boostCooldownTime = 5;
+const boostRefillDelay = 3;  // Wait 3 seconds after boost ends before refilling
+const boostRefillRate = 0.7;  // Seconds of boost restored per second
 const boostMultiplier = 1.8;
 
 const wheelSpeed = 4;
@@ -325,8 +326,6 @@ let boostFireEl = null;
 let boostFireDefaultPos = null;
 let boostFireMixer = null;
 let boostFireAction = null;
-let boostFireExtendT = 0;
-const boostFireExtendAmount = 1.2;
 let collisionBoxMesh = null;
 const keys = {};
 let engineTime = 0;
@@ -335,7 +334,8 @@ let wheelRotL = 0, wheelRotR = 0;
 let barrelRecoil = 0;
 let currentSpeed = 0, currentTurnSpeed = 0;
 let boostRemaining = boostDuration;
-let boostCooldown = 0;
+let boostRefillDelayRemaining = 0;
+let lastFrameWantedBoostButEmpty = false;
 let weaponMode = 1;
 let weaponSwitchPhase = 'idle';
 let weaponSwitchT = 0;
@@ -426,6 +426,7 @@ let reloadBuffer = null;
 let heatBeamSource = null;
 let explodeBuffer = null;
 let repairBuffer = null;
+let squirtBuffer = null;
 let thudBuffer = null;
 let winSpeechBuffers = [];
 let lossSpeechBuffers = [];
@@ -485,15 +486,17 @@ async function loadGameSounds() {
   const results = await Promise.all([
     loadAudio(asset('/assets/audio/explode.mp3')),
     loadAudio(asset('/assets/audio/repair.mp3')),
+    loadAudio(asset('/assets/audio/squirt.mp3')),
     loadAudio(asset('/assets/audio/thud.mp3')),
     ...winFiles.map((f) => loadAudio(asset(`/assets/audio/speech/win/${f}`))),
     ...lossFiles.map((f) => loadAudio(asset(`/assets/audio/speech/loss/${f}`)))
   ]);
   explodeBuffer = results[0];
   repairBuffer = results[1];
-  thudBuffer = results[2];
-  winSpeechBuffers = results.slice(3, 6);
-  lossSpeechBuffers = results.slice(6, 9);
+  squirtBuffer = results[2];
+  thudBuffer = results[3];
+  winSpeechBuffers = results.slice(4, 7);
+  lossSpeechBuffers = results.slice(7, 10);
 }
 
 function playOnce(buffer) {
@@ -923,7 +926,6 @@ function disposeScene() {
   boostFireDefaultPos = null;
   boostFireMixer = null;
   boostFireAction = null;
-  boostFireExtendT = 0;
   weaponBarrels = {};
   fallbackBarrel = null;
   enemies.length = 0;
@@ -990,7 +992,7 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   wheelRotR = 0;
   barrelRecoil = 0;
   boostRemaining = boostDuration;
-  boostCooldown = 0;
+  boostRefillDelayRemaining = 0;
   weaponMode = 1;
   weaponSwitchPhase = 'idle';
   weaponSwitchT = 0;
@@ -999,6 +1001,7 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   fireEMPPending = false;
   laserHoleCooldown = 0;
   thudCooldown = 0;
+  lastFrameWantedBoostButEmpty = false;
   wallHittingLastFrame = false;
   lastLaserDamageTime = 0;
   playerKnockbackVel = { x: 0, y: 0, z: 0 };
@@ -1009,7 +1012,6 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   boostFireDefaultPos = null;
   boostFireMixer = null;
   boostFireAction = null;
-  boostFireExtendT = 0;
   weaponBarrels = {};
   fallbackBarrel = null;
   barrelGroup = null;
@@ -1993,14 +1995,28 @@ function animate() {
   const dt = 0.016;
 
   const canDrive = !playerDead && (!enemyDead || exitHatch);
-  const isBoosting = canDrive && isKeyForAction(keys, 'boost') && boostRemaining > 0 && boostCooldown <= 0;
+  const wantsBoost = canDrive && isKeyForAction(keys, 'boost');
+  const isBoosting = wantsBoost && boostRemaining > 0 && boostRefillDelayRemaining <= 0;
+
   if (isBoosting) {
+    const wasPositive = boostRemaining > 0;
     boostRemaining = Math.max(0, boostRemaining - dt);
-    if (boostRemaining <= 0) boostCooldown = boostCooldownTime;
-  } else if (boostCooldown > 0) {
-    boostCooldown = Math.max(0, boostCooldown - dt);
-    if (boostCooldown <= 0) boostRemaining = boostDuration;
+    if (wasPositive && boostRemaining <= 0) {
+      boostRefillDelayRemaining = boostRefillDelay;
+      playOnce(squirtBuffer);
+    }
+  } else {
+    if (boostRefillDelayRemaining > 0) {
+      boostRefillDelayRemaining = Math.max(0, boostRefillDelayRemaining - dt);
+    } else if (boostRemaining < boostDuration) {
+      boostRemaining = Math.min(boostDuration, boostRemaining + boostRefillRate * dt);
+    }
+    if (wantsBoost && boostRemaining <= 0 && !lastFrameWantedBoostButEmpty) {
+      playOnce(squirtBuffer);
+    }
   }
+  // Only reset when they release boost key; prevents squirt replay during micro-boost refill/drain cycle
+  lastFrameWantedBoostButEmpty = wantsBoost ? (boostRemaining <= 0 || lastFrameWantedBoostButEmpty) : false;
 
   if (tankRigidBody) updateEngineSound(isBoosting);
 
@@ -2788,21 +2804,22 @@ function animate() {
     [wheelFR, wheelBR].forEach((w) => { if (w) w.rotation.x = wheelRotR; });
   }
 
-  // Boost-fire: extend out back during boost, retract and hide after
-  if (boostFireEl && boostFireDefaultPos) {
-    const extendSpeed = 8;
-    boostFireExtendT += (isBoosting ? 1 : -1) * extendSpeed * dt;
-    boostFireExtendT = Math.max(0, Math.min(1, boostFireExtendT));
-    const t = boostFireExtendT * boostFireExtendT * (3 - 2 * boostFireExtendT); // smoothstep
-    boostFireEl.position.z = boostFireDefaultPos.z + boostFireExtendAmount * t;
-    boostFireEl.visible = boostFireExtendT > 0.01;
-    if (boostFireMixer) {
-      boostFireMixer.update(dt);
-      if (isBoosting && boostFireAction) {
-        if (!boostFireAction.isRunning()) boostFireAction.reset().play();
-      } else if (boostFireAction) {
-        boostFireAction.stop();
+  // Boost-fire: show at Blender-defined position during boost, play animation, hide after
+  if (boostFireEl) {
+    if (isBoosting) {
+      if (!boostFireEl.visible && boostFireDefaultPos) {
+        boostFireEl.position.copy(boostFireDefaultPos);
       }
+      boostFireEl.visible = true;
+      if (boostFireMixer) {
+        boostFireMixer.update(dt);
+        if (boostFireAction) {
+          if (!boostFireAction.isRunning()) boostFireAction.reset().play();
+        }
+      }
+    } else {
+      boostFireEl.visible = false;
+      if (boostFireAction) boostFireAction.stop();
     }
   }
 
@@ -3545,8 +3562,12 @@ function animate() {
     if (isBoosting && boostRemaining > 0) {
       boostIndicatorEl.textContent = `BOOST ${boostRemaining.toFixed(2)}`;
       boostIndicatorEl.classList.add('visible');
+      boostIndicatorEl.classList.remove('refilling');
+    } else if (boostRemaining < boostDuration) {
+      boostIndicatorEl.textContent = `BOOST REFILLING ${boostRemaining.toFixed(2)}`;
+      boostIndicatorEl.classList.add('visible', 'refilling');
     } else {
-      boostIndicatorEl.classList.remove('visible');
+      boostIndicatorEl.classList.remove('visible', 'refilling');
     }
   }
 
