@@ -235,13 +235,8 @@ function initSplash() {
 export function goToMainMenu() {
   document.getElementById('game-container').classList.add('hidden');
   document.getElementById('splash').classList.remove('hidden');
-  document.getElementById('tank-select').classList.add('hidden');
-  document.getElementById('level-select').classList.remove('hidden');
-  showVolumeControls(true);
-  playMenuMusic();
-  const logoImg = document.querySelector('#level-select-logo img');
-  if (logoImg) logoImg.src = asset('/assets/images/Logo.svg');
-  buildLevelGrid();
+  document.getElementById('level-select').classList.add('hidden');
+  showTankSelect();
 }
 
 function buildLevelGrid() {

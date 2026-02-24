@@ -1,10 +1,11 @@
 import * as THREE from 'three';
-import { getLevelGlbPath, getNextLevelId, markDefeated } from './levels.js';
+import { getLevelGlbPath, getLevelById, getNextLevelId, markDefeated } from './levels.js';
 import { getCharacterGlbPath, getCharacterById } from './characters.js';
 import { isTouchMode } from './input-mode.js';
 import { loadKeybindings, getActionForKey, getKeyForAction, isKeyForAction } from './keybindings.js';
 import { showControlsIfFirstLevel01, showControlsModal, isControlsModalOpen } from './controls-modal.js';
 import { initMasterGain } from './audio.js';
+import { goToMainMenu } from './splash.js';
 
 // Resolve asset paths for both local dev (/) and GitHub Pages (/ttt/)
 const asset = (path) => import.meta.env.BASE_URL + path.replace(/^\//, '');
@@ -794,6 +795,113 @@ function stopGame() {
   stopHeatBeamSound();
 }
 
+/** Unload and dispose the 3D scene, then return to character selection. */
+function disposeScene() {
+  stopGame();
+
+  // Bullet holes
+  for (const { mesh } of bulletHoles) {
+    scene.remove(mesh);
+    mesh.material?.dispose?.();
+  }
+  bulletHoles.length = 0;
+
+  // Tank collision box
+  if (collisionBoxMesh?.parent) {
+    collisionBoxMesh.parent.remove(collisionBoxMesh);
+    collisionBoxMesh.geometry?.dispose?.();
+    collisionBoxMesh.material?.dispose?.();
+    collisionBoxMesh = null;
+  }
+
+  // Trajectory lines, markers, lights
+  for (const obj of [mgLine, cannonTrajectoryLine, laserTrajectoryLine, cannonTrajectoryEndSphere, empRadiusMarker]) {
+    if (obj?.parent) {
+      obj.parent.remove(obj);
+      disposeObject3D(obj);
+    }
+  }
+  for (const light of [muzzleLight, laserHitLight]) {
+    if (light?.parent) {
+      light.parent.remove(light);
+    }
+  }
+  mgLine = null;
+  cannonTrajectoryLine = null;
+  laserTrajectoryLine = null;
+  cannonTrajectoryEndSphere = null;
+  empRadiusMarker = null;
+  muzzleLight = null;
+  laserHitLight = null;
+
+  // Cannon balls, EMP waves, explosion pieces
+  for (const cb of cannonBalls) {
+    if (cb.mesh?.parent) {
+      cb.mesh.parent.remove(cb.mesh);
+      disposeObject3D(cb.mesh);
+    }
+  }
+  cannonBalls.length = 0;
+  for (const w of empWaves) {
+    if (w.mesh?.parent) {
+      w.mesh.parent.remove(w.mesh);
+      disposeObject3D(w.mesh);
+    }
+  }
+  empWaves.length = 0;
+  for (const p of explosionPieces) {
+    if (p.mesh?.parent) {
+      p.mesh.parent.remove(p.mesh);
+      disposeObject3D(p.mesh);
+    }
+  }
+  explosionPieces.length = 0;
+
+  // Fire/impact flash
+  if (fireFlash?.parent) {
+    fireFlash.parent.remove(fireFlash);
+    disposeObject3D(fireFlash);
+  }
+  if (impactFlash?.parent) {
+    impactFlash.parent.remove(impactFlash);
+    disposeObject3D(impactFlash);
+  }
+  fireFlash = null;
+  impactFlash = null;
+
+  // Remove and dispose all scene children except lights
+  scene.children.slice().forEach((c) => {
+    if (!c.isLight) {
+      disposeObject3D(c);
+      scene.remove(c);
+    }
+  });
+
+  // Reset physics world
+  world = new RAPIER.World(new RAPIER.Vector3(0, -9.81, 0));
+
+  // Clear references
+  tankRigidBody = null;
+  tankMesh = null;
+  barrelGroup = null;
+  weaponBarrels = {};
+  fallbackBarrel = null;
+  enemies.length = 0;
+  turrets.length = 0;
+  healthPickups.length = 0;
+  ammoPickups.length = 0;
+  exitHatch = null;
+  pathfinding = null;
+  pathfindingZoneId = null;
+
+  // Hide overlays
+  if (lossOverlayEl) lossOverlayEl.classList.add('hidden');
+  if (youWinOverlayEl) youWinOverlayEl.classList.add('hidden');
+  escapePauseActive = false;
+
+  goToMainMenu();
+}
+
 async function init(levelId = 'level-01', tankId = 'tank-01') {
   loadKeybindings();
   gameActive = true;
@@ -926,9 +1034,13 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
 
   // Load Level
   const levelPath = await getLevelGlbPath(levelId);
+  const levelData = await getLevelById(levelId);
   const levelGlb = await loader.loadAsync(levelPath);
   nextLevelIdForButton = await getNextLevelId(levelId);
   const level = levelGlb.scene;
+  const levelColor = levelData?.color ? new THREE.Color(levelData.color) : new THREE.Color(0x261377);
+  scene.background = levelColor;
+  scene.fog.color.copy(levelColor);
   level.updateMatrixWorld(true);
 
   const spawns = collectSpawnPoints(level);
@@ -1630,9 +1742,7 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     controlsBtn.addEventListener('click', () => showControlsModal());
     const menuBtn = document.createElement('button');
     menuBtn.textContent = 'Main Menu';
-    menuBtn.addEventListener('click', () => {
-      location.reload();
-    });
+    menuBtn.addEventListener('click', () => disposeScene());
     lossOverlayEl.append(retryBtn, controlsBtn, menuBtn);
     document.body.appendChild(lossOverlayEl);
   }
@@ -1646,9 +1756,7 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     controlsBtn.addEventListener('click', () => showControlsModal());
     const menuBtn = document.createElement('button');
     menuBtn.textContent = 'Main Menu';
-    menuBtn.addEventListener('click', () => {
-      location.reload();
-    });
+    menuBtn.addEventListener('click', () => disposeScene());
     youWinOverlayEl.append(controlsBtn, menuBtn);
     document.body.appendChild(youWinOverlayEl);
   }
