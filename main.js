@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { getLevelGlbPath, getNextLevelId, markDefeated, getLevelById } from './levels.js';
+import { getLevelGlbPath, getNextLevelId, markDefeated } from './levels.js';
 import { getCharacterGlbPath, getCharacterById } from './characters.js';
 import { isTouchMode } from './input-mode.js';
 import { loadKeybindings, getActionForKey, getKeyForAction, isKeyForAction } from './keybindings.js';
@@ -27,6 +27,7 @@ const masterGain = initMasterGain(audioCtx);
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────
 const showCollisionBox = false;
+const showEnemyCollisionBox = true;  // Set true to see enemy/turret hitboxes in-game
 const showNavmeshDebug = false;  // Set true to see navmesh in-game (semi-transparent green)
 
 const camHeight = 20;
@@ -98,7 +99,6 @@ const enemyStuckDist = 2;
 const enemyStuckTime = 0.8;
 const enemyPathUpdateInterval = 0.25;
 const enemyWaypointReachDist = 2.5;
-const enemyPathLookAhead = 3;  // Steer toward waypoint N ahead (smoother curves; 1 = sharp turns)
 const enemyMoveAlignThreshold = 0.6;   // Must face target before moving forward (allows quicker turn onto path around void)
 const turretLaserRange = 25;
 const turretLaserDuration = 0.5;
@@ -383,12 +383,16 @@ let playerKnockbackVel = { x: 0, y: 0, z: 0 };
 let enemyKnockbackVel = { x: 0, y: 0, z: 0 };
 let healthPickups = [];
 let ammoPickups = [];
+/** @type {{ mesh: THREE.Object3D, mixer: THREE.AnimationMixer, openAction: THREE.AnimationAction, position: THREE.Vector3, isOpen: boolean } | null} */
+let exitHatch = null;
+let exitTransitionTriggered = false;
 let pathfinding = null;
 let pathfindingZoneId = null;
 let lastPathLogTime = 0;
 const impactFlashDuration = 0.7;
 const healthPickupRadius = 2.5;
 const ammoPickupRadius = 2.5;
+const exitPickupRadius = 2.5;
 const healthPickupAmount = 0.3;
 const cannonBallGeo = new THREE.SphereGeometry(0.2, 8, 8);
 const cannonBallMat = new THREE.MeshStandardMaterial({
@@ -421,7 +425,6 @@ let winSpeechPlayed = false;
 let lossSpeechPlayed = false;
 let currentLevelId = 'level-01';
 let currentTankId = 'tank-01';
-let currentLevelPathLookAhead = enemyPathLookAhead;  // Per-level override for curved vs straight paths
 let playerCharacter = null;
 let playerHealthMaxDynamic = 100;
 let playerMaxSpeed = 15;
@@ -516,7 +519,7 @@ function stopHeatBeamSound() {
 function updateEngineSound() {
   if (!engineBuffer) return;
 
-  const absSpeed = enemyDead ? 0 : Math.abs(currentSpeed);
+  const absSpeed = (enemyDead && !exitHatch) ? 0 : Math.abs(currentSpeed);
   const normalized = Math.min(absSpeed / playerMaxSpeed, 1);
 
   if (!engineSource && normalized > 0) {
@@ -608,9 +611,19 @@ function createEnemyTank(tankTemplate, spawnPos = { x: 15, y: 2, z: 15 }, spawnR
   if (spawnRot && (spawnRot instanceof THREE.Quaternion || (spawnRot.x !== undefined && spawnRot.w !== undefined))) {
     rb.setRotation(spawnRot instanceof THREE.Quaternion ? { x: spawnRot.x, y: spawnRot.y, z: spawnRot.z, w: spawnRot.w } : spawnRot, true);
   }
+  let enemyCollisionBoxMesh = null;
+  if (showEnemyCollisionBox) {
+    const boxGeo = new THREE.BoxGeometry(tankColliderSize.x * 2, tankColliderSize.y * 2, tankColliderSize.z * 2);
+    enemyCollisionBoxMesh = new THREE.LineSegments(
+      new EdgesGeometry(boxGeo),
+      new THREE.LineBasicMaterial({ color: 0xff6600 })
+    );
+    enemyCollisionBoxMesh.position.set(tankColliderOffset.x, tankColliderOffset.y, tankColliderOffset.z);
+    enemy.add(enemyCollisionBoxMesh);
+  }
   scene.add(enemy);
   return {
-    mesh: enemy, body, barrel, wFL, wFR, wBL, wBR, rigidBody: rb, collider: col,
+    mesh: enemy, body, barrel, wFL, wFR, wBL, wBR, rigidBody: rb, collider: col, collisionBoxMesh: enemyCollisionBoxMesh,
     health: enemyHealthMax, cannonCooldown: 0, engineTime: 0, stuckTimer: 0, hitJolt: 0,
     lastPos: { x: pos.x, y: pos.y ?? 2, z: pos.z }, knockbackVel: { x: 0, y: 0, z: 0 }, hitFlashUntil: 0,
     pathTarget: null, path: [], pathUpdateTime: 0,
@@ -634,15 +647,28 @@ function createTurret(turretTemplate, spawnPos = { x: 10, y: 0, z: 10 }, spawnRo
   if (spawnRot && (spawnRot instanceof THREE.Quaternion || spawnRot.w !== undefined)) {
     turret.quaternion.copy(spawnRot instanceof THREE.Quaternion ? spawnRot : new THREE.Quaternion(spawnRot.x, spawnRot.y, spawnRot.z, spawnRot.w));
   }
-  const collider = RAPIER.ColliderDesc.cylinder(1, 2.4);
+  const turretColliderRadius = 1.2;
+  const turretColliderHalfHeight = 4;   // Tall enough to cover Base + Head
+  const turretColliderCenterY = 2.5;     // Center above mesh base so head is inside
+  const collider = RAPIER.ColliderDesc.cylinder(turretColliderRadius, turretColliderHalfHeight);
   const rb = world.createRigidBody(
     RAPIER.RigidBodyDesc.fixed()
   );
-  rb.setTranslation({ x: pos.x, y: pos.y + 1.3, z: pos.z }, true);
+  rb.setTranslation({ x: pos.x, y: pos.y + turretColliderCenterY, z: pos.z }, true);
   if (spawnRot && (spawnRot instanceof THREE.Quaternion || spawnRot.w !== undefined)) {
     rb.setRotation(spawnRot instanceof THREE.Quaternion ? { x: spawnRot.x, y: spawnRot.y, z: spawnRot.z, w: spawnRot.w } : spawnRot, true);
   }
   world.createCollider(collider, rb);
+  let turretCollisionBoxMesh = null;
+  if (showEnemyCollisionBox) {
+    const cylGeo = new THREE.CylinderGeometry(turretColliderRadius, turretColliderRadius, turretColliderHalfHeight * 2, 16);
+    turretCollisionBoxMesh = new THREE.LineSegments(
+      new EdgesGeometry(cylGeo),
+      new THREE.LineBasicMaterial({ color: 0xff6600 })
+    );
+    turretCollisionBoxMesh.position.set(0, turretColliderCenterY, 0);  // Match rigid body offset above mesh base
+    turret.add(turretCollisionBoxMesh);
+  }
   const laserGeo = new LineGeometry();
   const laserMat = new LineMaterial({
     color: 0xff4444,
@@ -655,7 +681,7 @@ function createTurret(turretTemplate, spawnPos = { x: 10, y: 0, z: 10 }, spawnRo
   scene.add(laserLine);
   scene.add(turret);
   return {
-    mesh: turret, base, head, laserOrigin, rigidBody: rb, collider, laserLine,
+    mesh: turret, base, head, laserOrigin, rigidBody: rb, collider, laserLine, collisionBoxMesh: turretCollisionBoxMesh,
     health: enemyHealthMax, laserCooldown: 0, laserShootingUntil: 0, hitFlashUntil: 0
   };
 }
@@ -692,12 +718,13 @@ const SPAWN_NAMES = {
   enemyTurret: 'Spawn_Enemy_Turret',
   turret: 'Spawn_Turret',
   health: 'Spawn_Health',
-  ammo: 'Spawn_Ammo'
+  ammo: 'Spawn_Ammo',
+  exit: 'Spawn_Exit'
 };
 
 function collectSpawnPoints(level) {
   level.updateMatrixWorld(true);
-  const spawns = { player: null, enemyTank: [], enemyTurret: [], health: [], ammo: [] };
+  const spawns = { player: null, enemyTank: [], enemyTurret: [], health: [], ammo: [], exit: null };
   const toRemove = [];
   level.traverse((c) => {
     if (c.name.startsWith(SPAWN_NAMES.player)) {
@@ -714,6 +741,9 @@ function collectSpawnPoints(level) {
       toRemove.push(c);
     } else if (c.name.startsWith(SPAWN_NAMES.ammo)) {
       spawns.ammo.push({ position: c.getWorldPosition(new THREE.Vector3()), rotation: c.getWorldQuaternion(new THREE.Quaternion()) });
+      toRemove.push(c);
+    } else if (c.name.startsWith(SPAWN_NAMES.exit)) {
+      if (!spawns.exit) spawns.exit = { position: c.getWorldPosition(new THREE.Vector3()), rotation: c.getWorldQuaternion(new THREE.Quaternion()) };
       toRemove.push(c);
     }
   });
@@ -797,6 +827,8 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   explosionPieces = [];
   healthPickups = [];
   ammoPickups = [];
+  exitHatch = null;
+  exitTransitionTriggered = false;
   bulletHoles.length = 0;
   currentSpeed = 0;
   currentTurnSpeed = 0;
@@ -891,9 +923,6 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   });
 
   world = new RAPIER.World(new RAPIER.Vector3(0, -9.81, 0));
-
-  const levelConfig = await getLevelById(levelId);
-  currentLevelPathLookAhead = levelConfig?.pathLookAhead ?? enemyPathLookAhead;
 
   // Load Level
   const levelPath = await getLevelGlbPath(levelId);
@@ -1104,6 +1133,61 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
       }
     } catch (e) {
       console.warn('Ammo pickup model not found, skipping:', e.message);
+    }
+  }
+
+  // Exit garage at Spawn_Exit (hollow cube with door; walls are solid; opens when all enemies defeated; drive into it to advance)
+  if (spawns.exit) {
+    try {
+      const exitGlb = await loader.loadAsync(asset('/assets/items/exit.glb'));
+      const exitMesh = exitGlb.scene;
+      exitMesh.traverse((c) => { if (c.isMesh) c.castShadow = c.receiveShadow = true; });
+      exitMesh.position.copy(spawns.exit.position);
+      exitMesh.quaternion.copy(spawns.exit.rotation);
+      scene.add(exitMesh);
+      exitMesh.updateMatrixWorld(true);
+
+      // Add collision for garage_walls so the tank cannot drive through them
+      const garageWalls = exitMesh.getObjectByName('garage_walls');
+      if (garageWalls?.geometry) {
+        const { vertices, indices } = geometryToRapier(garageWalls.geometry, garageWalls.matrixWorld);
+        const collider = RAPIER.ColliderDesc.trimesh(vertices, indices)
+          .setFriction(1.0)
+          .setRestitution(0.05);
+        world.createCollider(collider);
+      } else if (garageWalls) {
+        garageWalls.traverse((c) => {
+          if (c.isMesh && c.geometry) {
+            const { vertices, indices } = geometryToRapier(c.geometry, c.matrixWorld);
+            const collider = RAPIER.ColliderDesc.trimesh(vertices, indices)
+              .setFriction(1.0)
+              .setRestitution(0.05);
+            world.createCollider(collider);
+          }
+        });
+      }
+
+      const mixer = new THREE.AnimationMixer(exitMesh);
+      const clips = exitGlb.animations || [];
+      const openClip = clips.find((c) => c.name === 'Open') || clips[0];
+      const openAction = openClip ? mixer.clipAction(openClip) : null;
+      if (openAction) {
+        openAction.setLoop(THREE.LoopOnce, 1);
+        openAction.clampWhenFinished = true;
+      }
+      const allCleared = enemies.length === 0 && turrets.length === 0;
+      if (openAction && allCleared) {
+        openAction.play();
+      }
+      exitHatch = {
+        mesh: exitMesh,
+        mixer,
+        openAction,
+        position: spawns.exit.position.clone(),
+        isOpen: !!allCleared
+      };
+    } catch (e) {
+      console.warn('Exit garage model not found, skipping:', e.message);
     }
   }
 
@@ -1724,9 +1808,10 @@ function animate() {
   }
 
   // Mobile: joystick rotates tank, drive zone (drag up/down) controls speed. Desktop: keys.
+  const canDrive = !playerDead && (!enemyDead || exitHatch);
   const joystickActive = isTouchMode() && (touchJoystickInput.dx !== 0 || touchJoystickInput.dy !== 0);
   const driveActive = isTouchMode() && touchDriveInput.value !== 0;
-  const targetSpeed = (!playerDead && !enemyDead && tankRigidBody && (
+  const targetSpeed = (canDrive && tankRigidBody && (
     driveActive ? touchDriveInput.value * playerMaxSpeed
     : isKeyForAction(keys, 'forward') ? playerMaxSpeed
     : isKeyForAction(keys, 'backward') ? -playerMaxSpeed
@@ -1738,7 +1823,7 @@ function animate() {
     const dy = touchJoystickInput.dy;
     const mag = Math.sqrt(dx * dx + dy * dy);
     const desiredDir = mag > 0.001 ? new THREE.Vector3(-dx, 0, -dy).normalize() : null;
-    if (desiredDir && tankRigidBody && !playerDead && !enemyDead) {
+    if (desiredDir && tankRigidBody && canDrive) {
       const rot = tankRigidBody.rotation();
       const q = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
       const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
@@ -1749,10 +1834,10 @@ function animate() {
       targetTurn = 0;
     }
   } else {
-    targetTurn = (!playerDead && tankRigidBody && (isKeyForAction(keys, 'turnLeft') ? maxTurnSpeed : isKeyForAction(keys, 'turnRight') ? -maxTurnSpeed : 0)) || 0;
+    targetTurn = (canDrive && tankRigidBody && (isKeyForAction(keys, 'turnLeft') ? maxTurnSpeed : isKeyForAction(keys, 'turnRight') ? -maxTurnSpeed : 0)) || 0;
   }
 
-  const isBoosting = !playerDead && !enemyDead && isKeyForAction(keys, 'boost') && boostRemaining > 0 && boostCooldown <= 0;
+  const isBoosting = canDrive && isKeyForAction(keys, 'boost') && boostRemaining > 0 && boostCooldown <= 0;
   if (isBoosting) {
     boostRemaining = Math.max(0, boostRemaining - dt);
     if (boostRemaining <= 0) boostCooldown = boostCooldownTime;
@@ -1762,8 +1847,9 @@ function animate() {
   }
 
   const speedMult = isBoosting ? boostMultiplier : 1;
-  const speedRate = targetSpeed !== 0 ? playerAccelRate : (enemyDead ? 8 : decelRateForward);
-  const turnRate = targetTurn !== 0 ? playerAccelRate : (enemyDead ? 8 : decelRateTurn);
+  const movementLocked = enemyDead && !exitHatch;
+  const speedRate = targetSpeed !== 0 ? playerAccelRate : (movementLocked ? 8 : decelRateForward);
+  const turnRate = targetTurn !== 0 ? playerAccelRate : (movementLocked ? 8 : decelRateTurn);
 
   // Only update drive state when grounded; when airborne, freeze so holding Back doesn't "charge" reverse
   if (hit) {
@@ -1771,7 +1857,7 @@ function animate() {
     currentTurnSpeed += (targetTurn - currentTurnSpeed) * Math.min(1, turnRate * dt);
   }
 
-  if (!playerDead && !enemyDead && tankRigidBody) {
+  if (canDrive && tankRigidBody) {
     if (isKeyForAction(keys, 'resetAim')) {
       bodyAimPitch = 0;
     } else {
@@ -1788,7 +1874,7 @@ function animate() {
   // Wall check (forward ray) - used to avoid driving into walls while falling
   let hittingWall = false;
   if (tankRigidBody) {
-    if (!playerDead && !enemyDead && Math.abs(currentSpeed) > 1) {
+    if (canDrive && Math.abs(currentSpeed) > 1) {
       const fwdDir = currentSpeed > 0 ? forward : forward.clone().negate();
       const fwdRay = new RAPIER.Ray(
         { x: pos.x + fwdDir.x * 0.5, y: pos.y, z: pos.z + fwdDir.z * 0.5 },
@@ -1937,19 +2023,15 @@ function animate() {
         if (distToTarget < enemyWaypointReachDist && e.path.length > 1) {
           e.path.shift();
           e.pathTarget = e.path[0];
-          const toNew = new THREE.Vector3(e.pathTarget.x - ePos.x, 0, e.pathTarget.z - ePos.z);
-          distToTarget = toNew.length();
+          const toNext = new THREE.Vector3(e.pathTarget.x - ePos.x, 0, e.pathTarget.z - ePos.z);
+          distToTarget = toNext.length();
+          toTarget = toNext.normalize();
         } else if (distToTarget < enemyWaypointReachDist && e.path.length <= 1) {
           e.pathTarget = null;
           toTarget = toPlayer.clone();
           distToTarget = dist;
-        }
-        // Steering target: look ahead for smoother curves (e.g. circular paths)
-        const lookAheadIdx = Math.min(currentLevelPathLookAhead, e.path.length - 1);
-        const steerTarget = e.path[lookAheadIdx] || e.pathTarget;
-        if (steerTarget) {
-          const toSteer = new THREE.Vector3(steerTarget.x - ePos.x, 0, steerTarget.z - ePos.z);
-          if (toSteer.lengthSq() > 0.0001) toTarget = toSteer.normalize();
+        } else {
+          toTarget = toWaypoint.normalize();
         }
       }
     }
@@ -2277,6 +2359,65 @@ function animate() {
         playOnce(repairBuffer);
       }
     }
+    // Exit garage: drive into it when open; close door (reverse Open) then transition
+    if (exitHatch && exitHatch.isOpen && !exitTransitionTriggered) {
+      const dx = exitHatch.position.x - posFinal.x;
+      const dz = exitHatch.position.z - posFinal.z;
+      const distSq = dx * dx + dz * dz;
+      if (distSq < exitPickupRadius * exitPickupRadius) {
+        exitTransitionTriggered = true;
+        markDefeated(currentLevelId);
+        const { mixer, openAction } = exitHatch;
+        if (openAction) {
+          const clip = openAction.getClip();
+          openAction.reset();
+          openAction.time = clip.duration;
+          openAction.setEffectiveTimeScale(-1);
+          openAction.play();
+          const onFinished = (e) => {
+            if (e.action === openAction) {
+              mixer.removeEventListener('finished', onFinished);
+              openAction.setEffectiveTimeScale(1);
+              if (nextLevelIdForButton) {
+                const loadingEl = document.getElementById('loading-overlay');
+                if (loadingEl) loadingEl.classList.remove('hidden');
+                getNextLevelId(currentLevelId).then((nextId) => {
+                  if (nextId) return init(nextId, currentTankId);
+                }).finally(() => {
+                  const el = document.getElementById('loading-overlay');
+                  if (el) el.classList.add('hidden');
+                });
+              } else if (youWinOverlayEl) {
+                youWinOverlayEl.classList.remove('hidden');
+              }
+            }
+          };
+          mixer.addEventListener('finished', onFinished);
+        } else {
+          if (nextLevelIdForButton) {
+            const loadingEl = document.getElementById('loading-overlay');
+            if (loadingEl) loadingEl.classList.remove('hidden');
+            getNextLevelId(currentLevelId).then((nextId) => {
+              if (nextId) return init(nextId, currentTankId);
+            }).finally(() => {
+              const el = document.getElementById('loading-overlay');
+              if (el) el.classList.add('hidden');
+            });
+          } else if (youWinOverlayEl) {
+            youWinOverlayEl.classList.remove('hidden');
+          }
+        }
+      }
+    }
+  }
+
+  // Exit garage: update animation mixer; open when all enemies defeated
+  if (exitHatch) {
+    exitHatch.mixer.update(dt);
+    if (!exitHatch.isOpen && enemies.length === 0 && turrets.length === 0 && exitHatch.openAction) {
+      exitHatch.isOpen = true;
+      exitHatch.openAction.reset().play();
+    }
   }
 
   // Pickup animations: health rotates, ammo bobs
@@ -2402,12 +2543,13 @@ function animate() {
     }
   }
   if (bodyGroup && tankMesh) {
-    if (!enemyDead) engineTime += dt * 370;
-    const bounce = enemyDead ? 0 : 0.05 * Math.sin(engineTime);
+    const movementLocked = enemyDead && !exitHatch;
+    if (!movementLocked) engineTime += dt * 370;
+    const bounce = movementLocked ? 0 : 0.05 * Math.sin(engineTime);
     bodyGroup.position.y = (bodyDefaultY ?? 0) + bounce;
 
-    const targetRoll = enemyDead ? 0 : -currentTurnSpeed / maxTurnSpeed * bodyRollMax;
-    const targetPitch = enemyDead ? 0 : -currentSpeed / playerMaxSpeed * bodyPitchMax;
+    const targetRoll = movementLocked ? 0 : -currentTurnSpeed / maxTurnSpeed * bodyRollMax;
+    const targetPitch = movementLocked ? 0 : -currentSpeed / playerMaxSpeed * bodyPitchMax;
     bodyRoll += (targetRoll - bodyRoll) * bodySuspensionSoftness;
     bodyPitch += (targetPitch - bodyPitch) * bodySuspensionSoftness;
     bodyGroup.rotation.set(bodyPitch + bodyAimPitch, 0, bodyRoll);
@@ -3111,7 +3253,8 @@ function animate() {
 
   const gameVisible = !document.getElementById('game-container')?.classList.contains('hidden');
   if (gameVisible) {
-    if (nextLevelBtnEl && enemyDead && !playerDead && nextLevelIdForButton) nextLevelBtnEl.classList.remove('hidden');
+    const showNextBtn = nextLevelBtnEl && enemyDead && !playerDead && nextLevelIdForButton && !exitHatch;
+    if (showNextBtn) nextLevelBtnEl.classList.remove('hidden');
     else if (nextLevelBtnEl) nextLevelBtnEl.classList.add('hidden');
     if (youWinOverlayEl && enemyDead && !playerDead && !nextLevelIdForButton) youWinOverlayEl.classList.remove('hidden');
     else if (youWinOverlayEl) youWinOverlayEl.classList.add('hidden');
