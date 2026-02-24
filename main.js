@@ -27,7 +27,7 @@ const masterGain = initMasterGain(audioCtx);
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────
 const showCollisionBox = false;
-const showEnemyCollisionBox = true;  // Set true to see enemy/turret hitboxes in-game
+const showEnemyCollisionBox = false;  // Set true to see enemy/turret hitboxes in-game
 const showNavmeshDebug = false;  // Set true to see navmesh in-game (semi-transparent green)
 
 const camHeight = 20;
