@@ -11,7 +11,7 @@
         },
         {
             "id": "level-02",
-            "name": "This Is Sparta!",
+            "name": "Mind The Gap",
             "order": 2,
             "difficulty": 1,
             "glbPath": "/assets/levels/level-02.glb",

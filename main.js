@@ -321,6 +321,12 @@ let barrelGroup, barrelDefaultZ;
 let weaponBarrels = {};
 let fallbackBarrel = null;
 let wheelFL, wheelFR, wheelBL, wheelBR;
+let boostFireEl = null;
+let boostFireDefaultPos = null;
+let boostFireMixer = null;
+let boostFireAction = null;
+let boostFireExtendT = 0;
+const boostFireExtendAmount = 1.2;
 let collisionBoxMesh = null;
 const keys = {};
 let engineTime = 0;
@@ -360,6 +366,7 @@ let laserTrajectoryLine = null;
 let muzzleLight = null;
 let laserHitLight = null;
 let hudEl = null;
+let boostIndicatorEl = null;
 let touchControlsEl = null;
 let fireCannonPending = false;
 let fireMortarPending = false;
@@ -375,6 +382,8 @@ let lastLaserDamageTime = 0;
 let enemies = [];
 /** @type {Array<{mesh:*,base:*,head:*,rigidBody:*,collider:*,health:number,laserCooldown:number,laserShootingUntil:number,hitFlashUntil:number}>} */
 let turrets = [];
+/** @type {Array<{mesh:*,rigidBody:*,baseY:number}>} */
+let targets = [];
 let explosionPieces = [];
 let lastCamTarget = { x: 0, y: 2, z: 0 };
 let camZoomFactor = 1;
@@ -384,7 +393,7 @@ let playerKnockbackVel = { x: 0, y: 0, z: 0 };
 let enemyKnockbackVel = { x: 0, y: 0, z: 0 };
 let healthPickups = [];
 let ammoPickups = [];
-/** @type {{ mesh: THREE.Object3D, mixer: THREE.AnimationMixer, openAction: THREE.AnimationAction, position: THREE.Vector3, isOpen: boolean } | null} */
+/** @type {{ mesh: THREE.Object3D, mixer: THREE.AnimationMixer, openAction: THREE.AnimationAction, position: THREE.Vector3, isOpen: boolean, doorMesh?: THREE.Object3D, doorRigidBody?: import('@dimforge/rapier3d').RigidBody } | null} */
 let exitHatch = null;
 let exitTransitionTriggered = false;
 let pathfinding = null;
@@ -393,7 +402,7 @@ let lastPathLogTime = 0;
 const impactFlashDuration = 0.7;
 const healthPickupRadius = 2.5;
 const ammoPickupRadius = 2.5;
-const exitPickupRadius = 2.5;
+const exitPickupRadius = 3.5;
 const healthPickupAmount = 0.3;
 const cannonBallGeo = new THREE.SphereGeometry(0.2, 8, 8);
 const cannonBallMat = new THREE.MeshStandardMaterial({
@@ -517,7 +526,7 @@ function stopHeatBeamSound() {
   }
 }
 
-function updateEngineSound() {
+function updateEngineSound(isBoosting = false) {
   if (!engineBuffer) return;
 
   const absSpeed = (enemyDead && !exitHatch) ? 0 : Math.abs(currentSpeed);
@@ -536,8 +545,10 @@ function updateEngineSound() {
   }
 
   if (engineSource) {
-    // Pitch: Idle ~0.8x (deep rumble) to 2x rev (use good sample to avoid chipmunk)
-    engineSource.playbackRate.value = 0.8 + normalized * 1.2;
+    // Pitch: Idle ~0.8x (deep rumble) to 2x rev; boost adds significant pitch-up
+    let pitch = 0.8 + normalized * 1.2;
+    if (isBoosting) pitch *= 1.6;  // Pitch up engine sound a lot during boost
+    engineSource.playbackRate.value = pitch;
     // Volume: Quiet idle, loud at speed
     engineGain.gain.value = 0.08 + normalized * 0.25;
   }
@@ -687,6 +698,26 @@ function createTurret(turretTemplate, spawnPos = { x: 10, y: 0, z: 10 }, spawnRo
   };
 }
 
+function createTarget(targetTemplate, spawnPos = { x: 0, y: 2, z: 0 }, spawnRot = null) {
+  const target = targetTemplate.clone();
+  const pos = spawnPos instanceof THREE.Vector3 ? spawnPos : { x: spawnPos.x, y: spawnPos.y ?? 2, z: spawnPos.z };
+  target.position.set(pos.x, pos.y, pos.z);
+  if (spawnRot && (spawnRot instanceof THREE.Quaternion || spawnRot.w !== undefined)) {
+    target.quaternion.copy(spawnRot instanceof THREE.Quaternion ? spawnRot : new THREE.Quaternion(spawnRot.x, spawnRot.y, spawnRot.z, spawnRot.w));
+  }
+  const targetColliderRadius = 0.8;
+  const targetColliderHalfHeight = 1;
+  const collider = RAPIER.ColliderDesc.cylinder(targetColliderRadius, targetColliderHalfHeight);
+  const rb = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+  rb.setTranslation({ x: pos.x, y: pos.y + targetColliderHalfHeight, z: pos.z }, true);
+  if (spawnRot && (spawnRot instanceof THREE.Quaternion || spawnRot.w !== undefined)) {
+    rb.setRotation(spawnRot instanceof THREE.Quaternion ? { x: spawnRot.x, y: spawnRot.y, z: spawnRot.z, w: spawnRot.w } : spawnRot, true);
+  }
+  world.createCollider(collider, rb);
+  scene.add(target);
+  return { mesh: target, rigidBody: rb, baseY: pos.y };
+}
+
 function explodeTank(mesh, rigidBody) {
   if (!mesh) return;
   const pieces = [];
@@ -718,6 +749,7 @@ const SPAWN_NAMES = {
   enemyTank: 'Spawn_Enemy_Tank',
   enemyTurret: 'Spawn_Enemy_Turret',
   turret: 'Spawn_Turret',
+  target: 'Spawn_Target',
   health: 'Spawn_Health',
   ammo: 'Spawn_Ammo',
   exit: 'Spawn_Exit'
@@ -725,7 +757,7 @@ const SPAWN_NAMES = {
 
 function collectSpawnPoints(level) {
   level.updateMatrixWorld(true);
-  const spawns = { player: null, enemyTank: [], enemyTurret: [], health: [], ammo: [], exit: null };
+  const spawns = { player: null, enemyTank: [], enemyTurret: [], target: [], health: [], ammo: [], exit: null };
   const toRemove = [];
   level.traverse((c) => {
     if (c.name.startsWith(SPAWN_NAMES.player)) {
@@ -736,6 +768,9 @@ function collectSpawnPoints(level) {
       toRemove.push(c);
     } else if (c.name.startsWith(SPAWN_NAMES.enemyTurret) || c.name.startsWith(SPAWN_NAMES.turret)) {
       spawns.enemyTurret.push({ position: c.getWorldPosition(new THREE.Vector3()), rotation: c.getWorldQuaternion(new THREE.Quaternion()) });
+      toRemove.push(c);
+    } else if (c.name.startsWith(SPAWN_NAMES.target)) {
+      spawns.target.push({ position: c.getWorldPosition(new THREE.Vector3()), rotation: c.getWorldQuaternion(new THREE.Quaternion()) });
       toRemove.push(c);
     } else if (c.name.startsWith(SPAWN_NAMES.health)) {
       spawns.health.push({ position: c.getWorldPosition(new THREE.Vector3()), rotation: c.getWorldQuaternion(new THREE.Quaternion()) });
@@ -884,6 +919,11 @@ function disposeScene() {
   tankRigidBody = null;
   tankMesh = null;
   barrelGroup = null;
+  boostFireEl = null;
+  boostFireDefaultPos = null;
+  boostFireMixer = null;
+  boostFireAction = null;
+  boostFireExtendT = 0;
   weaponBarrels = {};
   fallbackBarrel = null;
   enemies.length = 0;
@@ -965,11 +1005,17 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   impactFlashAge = -1;
   tankRigidBody = null;
   tankMesh = null;
+  boostFireEl = null;
+  boostFireDefaultPos = null;
+  boostFireMixer = null;
+  boostFireAction = null;
+  boostFireExtendT = 0;
   weaponBarrels = {};
   fallbackBarrel = null;
   barrelGroup = null;
   enemies = [];
   turrets = [];
+  targets = [];
   Object.keys(keys).forEach((k) => (keys[k] = false));
   if (nextLevelBtnEl) nextLevelBtnEl.classList.add('hidden');
   if (lossOverlayEl) lossOverlayEl.classList.add('hidden');
@@ -1121,6 +1167,23 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   bodyGroup = tankMesh.getObjectByName('Body');
   fallbackBarrel = tankMesh.getObjectByName('Barrel');
   wheelFL = tankMesh.getObjectByName('Wheel-FL');
+  let bf = tankMesh.getObjectByName('boost-fire') || tankMesh.getObjectByName('Boost-Fire');
+  if (!bf) {
+    tankMesh.traverse((c) => {
+      if (!bf && c.name && c.name.toLowerCase().replace(/[-_]/g, '') === 'boostfire') bf = c;
+    });
+  }
+  boostFireEl = bf;
+  if (boostFireEl) {
+    boostFireDefaultPos = boostFireEl.position.clone();
+    boostFireEl.visible = false;
+    const clips = tankGlb.animations || [];
+    const boostClip = clips.find((c) => c.name && c.name.toLowerCase() === 'boost');
+    if (boostClip) {
+      boostFireMixer = new THREE.AnimationMixer(tankMesh);
+      boostFireAction = boostFireMixer.clipAction(boostClip);
+    }
+  }
   wheelFR = tankMesh.getObjectByName('Wheel-FR');
   wheelBL = tankMesh.getObjectByName('Wheel-BL');
   wheelBR = tankMesh.getObjectByName('Wheel-BR');
@@ -1195,6 +1258,19 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
       }
     } catch (e) {
       console.warn('Turret model not found, skipping turret spawns:', e.message);
+    }
+  }
+
+  if (spawns.target.length > 0) {
+    try {
+      const targetGlb = await loader.loadAsync(asset('/assets/items/target.glb'));
+      targetGlb.scene.traverse((c) => { if (c.isMesh) c.castShadow = c.receiveShadow = true; });
+      for (const spawn of spawns.target) {
+        const targetData = createTarget(targetGlb.scene, spawn.position, spawn.rotation);
+        targets.push(targetData);
+      }
+    } catch (e) {
+      console.warn('Target model not found, skipping target spawns:', e.message);
     }
   }
 
@@ -1287,16 +1363,39 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
         openAction.setLoop(THREE.LoopOnce, 1);
         openAction.clampWhenFinished = true;
       }
-      const allCleared = enemies.length === 0 && turrets.length === 0;
+      const allCleared = enemies.length === 0 && turrets.length === 0 && targets.length === 0;
       if (openAction && allCleared) {
         openAction.play();
       }
+
+      // Kinematic rigid body for door - follows animation so tank cannot drive through when closed
+      let doorRigidBody = null;
+      const door = exitMesh.getObjectByName('door');
+      let doorMesh = null;
+      if (door?.isMesh && door.geometry) doorMesh = door;
+      else if (door) { door.traverse((c) => { if (c.isMesh && c.geometry && !doorMesh) doorMesh = c; }); }
+      if (doorMesh?.geometry) {
+        const { vertices, indices } = geometryToRapier(doorMesh.geometry, new THREE.Matrix4());
+        const doorBodyDesc = RAPIER.RigidBodyDesc.kinematicPositionBased();
+        doorRigidBody = world.createRigidBody(doorBodyDesc);
+        const doorCollider = RAPIER.ColliderDesc.trimesh(vertices, indices)
+          .setFriction(1.0)
+          .setRestitution(0.05);
+        world.createCollider(doorCollider, doorRigidBody);
+        const doorPos = doorMesh.getWorldPosition(new THREE.Vector3());
+        const doorQuat = doorMesh.getWorldQuaternion(new THREE.Quaternion());
+        doorRigidBody.setNextKinematicTranslation({ x: doorPos.x, y: doorPos.y, z: doorPos.z });
+        doorRigidBody.setNextKinematicRotation({ x: doorQuat.x, y: doorQuat.y, z: doorQuat.z, w: doorQuat.w });
+      }
+
       exitHatch = {
         mesh: exitMesh,
         mixer,
         openAction,
         position: spawns.exit.position.clone(),
-        isOpen: !!allCleared
+        isOpen: !!allCleared,
+        doorMesh: doorMesh || door,
+        doorRigidBody
       };
     } catch (e) {
       console.warn('Exit garage model not found, skipping:', e.message);
@@ -1402,6 +1501,13 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     bulletHoleTexture = new THREE.CanvasTexture(c);
     bulletHoleTexture.wrapS = bulletHoleTexture.wrapT = THREE.ClampToEdgeWrapping;
   });
+
+  if (!boostIndicatorEl) {
+    boostIndicatorEl = document.createElement('div');
+    boostIndicatorEl.className = 'boost-indicator';
+    boostIndicatorEl.setAttribute('aria-live', 'polite');
+    document.body.appendChild(boostIndicatorEl);
+  }
 
   hudEl = document.createElement('div');
   hudEl.classList.add('hud');
@@ -1750,7 +1856,7 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   if (!youWinOverlayEl) {
     youWinOverlayEl = document.createElement('div');
     youWinOverlayEl.classList.add('you-win-overlay', 'hidden');
-    youWinOverlayEl.innerHTML = '<div class="you-win-text">YOU WIN</div>';
+    youWinOverlayEl.innerHTML = '<div class="you-win-text">YOU WIN!</div>';
     const controlsBtn = document.createElement('button');
     controlsBtn.textContent = 'Controls';
     controlsBtn.addEventListener('click', () => showControlsModal());
@@ -1886,7 +1992,17 @@ function animate() {
   requestAnimationFrame(animate);
   const dt = 0.016;
 
-  if (tankRigidBody) updateEngineSound();
+  const canDrive = !playerDead && (!enemyDead || exitHatch);
+  const isBoosting = canDrive && isKeyForAction(keys, 'boost') && boostRemaining > 0 && boostCooldown <= 0;
+  if (isBoosting) {
+    boostRemaining = Math.max(0, boostRemaining - dt);
+    if (boostRemaining <= 0) boostCooldown = boostCooldownTime;
+  } else if (boostCooldown > 0) {
+    boostCooldown = Math.max(0, boostCooldown - dt);
+    if (boostCooldown <= 0) boostRemaining = boostDuration;
+  }
+
+  if (tankRigidBody) updateEngineSound(isBoosting);
 
   const anyEnemyAlive = enemies.some((e) => e.rigidBody && e.health > 0);
   const anyTurretAlive = turrets.some((t) => t.rigidBody && t.health > 0);
@@ -1916,7 +2032,6 @@ function animate() {
   }
 
   // Mobile: joystick rotates tank, drive zone (drag up/down) controls speed. Desktop: keys.
-  const canDrive = !playerDead && (!enemyDead || exitHatch);
   const joystickActive = isTouchMode() && (touchJoystickInput.dx !== 0 || touchJoystickInput.dy !== 0);
   const driveActive = isTouchMode() && touchDriveInput.value !== 0;
   const targetSpeed = (canDrive && tankRigidBody && (
@@ -1943,15 +2058,6 @@ function animate() {
     }
   } else {
     targetTurn = (canDrive && tankRigidBody && (isKeyForAction(keys, 'turnLeft') ? maxTurnSpeed : isKeyForAction(keys, 'turnRight') ? -maxTurnSpeed : 0)) || 0;
-  }
-
-  const isBoosting = canDrive && isKeyForAction(keys, 'boost') && boostRemaining > 0 && boostCooldown <= 0;
-  if (isBoosting) {
-    boostRemaining = Math.max(0, boostRemaining - dt);
-    if (boostRemaining <= 0) boostCooldown = boostCooldownTime;
-  } else if (boostCooldown > 0) {
-    boostCooldown = Math.max(0, boostCooldown - dt);
-    if (boostCooldown <= 0) boostRemaining = boostDuration;
   }
 
   const speedMult = isBoosting ? boostMultiplier : 1;
@@ -1989,7 +2095,7 @@ function animate() {
         { x: fwdDir.x, y: 0, z: fwdDir.z }
       );
       const fwdHit = world.castRay(fwdRay, 2.5, true, null, null, null, tankRigidBody);
-      const hitEnemy = fwdHit && (enemies.some((e) => e.rigidBody && fwdHit.collider.parent() === e.rigidBody) || turrets.some((t) => t.rigidBody && fwdHit.collider.parent() === t.rigidBody));
+      const hitEnemy = fwdHit && (enemies.some((e) => e.rigidBody && fwdHit.collider.parent() === e.rigidBody) || turrets.some((t) => t.rigidBody && fwdHit.collider.parent() === t.rigidBody) || targets.some((t) => t.rigidBody && fwdHit.collider.parent() === t.rigidBody));
       hittingWall = fwdHit && !hitEnemy;
     }
   }
@@ -2011,7 +2117,8 @@ function animate() {
       const forwardVel = linVel.x * forward.x + linVel.z * forward.z;
       // Carryover: when leaving a ledge while holding forward, ensure we keep at least currentSpeed
       // (helps slow tanks like Gerald who otherwise stop abruptly at the edge)
-      if (targetSpeed > 0 && forwardVel < currentSpeed && currentSpeed > 0.5) {
+      // Skip when nosed into wall: otherwise we inject forward velocity into the wall and stick
+      if (targetSpeed > 0 && forwardVel < currentSpeed && currentSpeed > 0.5 && !hittingWall) {
         const lateralX = linVel.x - forward.x * forwardVel;
         const lateralZ = linVel.z - forward.z * forwardVel;
         vx = forward.x * currentSpeed + lateralX + playerKnockbackVel.x;
@@ -2360,6 +2467,22 @@ function animate() {
     }
   }
 
+  // Exit garage: update animation before physics so door collider stays in sync
+  if (exitHatch) {
+    exitHatch.mixer.update(dt);
+    if (!exitHatch.isOpen && enemies.length === 0 && turrets.length === 0 && targets.length === 0 && exitHatch.openAction) {
+      exitHatch.isOpen = true;
+      exitHatch.openAction.reset().play();
+    }
+    if (exitHatch.doorRigidBody && exitHatch.doorMesh) {
+      exitHatch.mesh.updateMatrixWorld(true);
+      const doorPos = exitHatch.doorMesh.getWorldPosition(new THREE.Vector3());
+      const doorQuat = exitHatch.doorMesh.getWorldQuaternion(new THREE.Quaternion());
+      exitHatch.doorRigidBody.setNextKinematicTranslation({ x: doorPos.x, y: doorPos.y, z: doorPos.z });
+      exitHatch.doorRigidBody.setNextKinematicRotation({ x: doorQuat.x, y: doorQuat.y, z: doorQuat.z, w: doorQuat.w });
+    }
+  }
+
   world.step();
 
   const posFinal = tankRigidBody ? tankRigidBody.translation() : { x: 0, y: 0, z: 0 };
@@ -2385,7 +2508,7 @@ function animate() {
       playOnce(explodeBuffer);
       explosionPieces.push(...explodeTank(e.mesh, e.rigidBody));
       enemies.splice(i, 1);
-      if (enemies.length === 0 && turrets.length === 0 && !winSpeechPlayed) {
+      if (enemies.length === 0 && turrets.length === 0 && targets.length === 0 && !winSpeechPlayed) {
         enemyDead = true;
         winSpeechPlayed = true;
         markDefeated(currentLevelId);
@@ -2519,15 +2642,6 @@ function animate() {
     }
   }
 
-  // Exit garage: update animation mixer; open when all enemies defeated
-  if (exitHatch) {
-    exitHatch.mixer.update(dt);
-    if (!exitHatch.isOpen && enemies.length === 0 && turrets.length === 0 && exitHatch.openAction) {
-      exitHatch.isOpen = true;
-      exitHatch.openAction.reset().play();
-    }
-  }
-
   // Pickup animations: health rotates, ammo bobs
   for (const p of healthPickups) {
     if (p.collected) continue;
@@ -2537,6 +2651,10 @@ function animate() {
     if (p.collected) continue;
     const bob = 0.15 * Math.sin(now * 2);
     p.mesh.position.y = p.baseY + bob;
+  }
+  for (const tg of targets) {
+    const bob = 0.2 * Math.sin(now * 2.5);
+    tg.mesh.position.y = tg.baseY + bob;
   }
 
   for (const e of enemies) {
@@ -2668,6 +2786,24 @@ function animate() {
     wheelRotR += (-currentSpeed + currentTurnSpeed * turnWheelFactor) * dt * wheelSpeed;
     [wheelFL, wheelBL].forEach((w) => { if (w) w.rotation.x = wheelRotL; });
     [wheelFR, wheelBR].forEach((w) => { if (w) w.rotation.x = wheelRotR; });
+  }
+
+  // Boost-fire: extend out back during boost, retract and hide after
+  if (boostFireEl && boostFireDefaultPos) {
+    const extendSpeed = 8;
+    boostFireExtendT += (isBoosting ? 1 : -1) * extendSpeed * dt;
+    boostFireExtendT = Math.max(0, Math.min(1, boostFireExtendT));
+    const t = boostFireExtendT * boostFireExtendT * (3 - 2 * boostFireExtendT); // smoothstep
+    boostFireEl.position.z = boostFireDefaultPos.z + boostFireExtendAmount * t;
+    boostFireEl.visible = boostFireExtendT > 0.01;
+    if (boostFireMixer) {
+      boostFireMixer.update(dt);
+      if (isBoosting && boostFireAction) {
+        if (!boostFireAction.isRunning()) boostFireAction.reset().play();
+      } else if (boostFireAction) {
+        boostFireAction.stop();
+      }
+    }
   }
 
   // Weapon switch barrel animation
@@ -3031,7 +3167,20 @@ function animate() {
         const hitParent = hit.collider.parent();
         const hitEnemy = cb.owner === 'player' && !enemyDead ? enemies.find((e) => e.rigidBody && hitParent === e.rigidBody) : null;
         const hitTurret = cb.owner === 'player' ? turrets.find((t) => t.rigidBody && hitParent === t.rigidBody) : null;
-        if (hitEnemy && hitEnemy.health > 0) {
+        const hitTarget = cb.owner === 'player' ? targets.find((t) => t.rigidBody && hitParent === t.rigidBody) : null;
+        if (hitTarget) {
+          playOnce(explodeBuffer);
+          explosionPieces.push(...explodeTank(hitTarget.mesh, hitTarget.rigidBody));
+          targets = targets.filter((x) => x !== hitTarget);
+          if (enemies.length === 0 && turrets.length === 0 && targets.length === 0) {
+            enemyDead = true;
+            if (!winSpeechPlayed) {
+              winSpeechPlayed = true;
+              markDefeated(currentLevelId);
+              setTimeout(() => playRandomFrom(winSpeechBuffers), 1000);
+            }
+          }
+        } else if (hitEnemy && hitEnemy.health > 0) {
           hitEnemy.health = takeDamage(hitEnemy.rigidBody, hitEnemy.health, cb.damage ?? cannonDamage, 'primary', dir, hitEnemy.knockbackVel, cb.knockback ?? cannonKnockbackImpulse);
           hitEnemy.hitFlashUntil = now + 0.12;
           hitEnemy.hitJolt += 0.25;
@@ -3039,7 +3188,7 @@ function animate() {
             playOnce(explodeBuffer);
             explosionPieces.push(...explodeTank(hitEnemy.mesh, hitEnemy.rigidBody));
             enemies = enemies.filter((x) => x !== hitEnemy);
-            if (enemies.length === 0 && turrets.length === 0) {
+            if (enemies.length === 0 && turrets.length === 0 && targets.length === 0) {
               enemyDead = true;
               if (!winSpeechPlayed) {
                 winSpeechPlayed = true;
@@ -3056,7 +3205,7 @@ function animate() {
             explosionPieces.push(...explodeTank(hitTurret.mesh, hitTurret.rigidBody));
             if (hitTurret.laserLine) scene.remove(hitTurret.laserLine);
             turrets = turrets.filter((x) => x !== hitTurret);
-            if (enemies.length === 0 && turrets.length === 0) {
+            if (enemies.length === 0 && turrets.length === 0 && targets.length === 0) {
               enemyDead = true;
               if (!winSpeechPlayed) {
                 winSpeechPlayed = true;
@@ -3118,13 +3267,32 @@ function animate() {
                     playOnce(explodeBuffer);
                     explosionPieces.push(...explodeTank(e.mesh, e.rigidBody));
                     enemies = enemies.filter((x) => x !== e);
-                    if (enemies.length === 0 && turrets.length === 0) {
+                    if (enemies.length === 0 && turrets.length === 0 && targets.length === 0) {
                       enemyDead = true;
                       if (!winSpeechPlayed) {
                         winSpeechPlayed = true;
                         markDefeated(currentLevelId);
                         setTimeout(() => playRandomFrom(winSpeechBuffers), 1000);
                       }
+                    }
+                  }
+                }
+              }
+              for (const tg of targets.slice()) {
+                if (!tg.rigidBody) continue;
+                const tPos = tg.rigidBody.translation();
+                const dx = tPos.x - hitPoint.x, dy = tPos.y - hitPoint.y, dz = tPos.z - hitPoint.z;
+                const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                if (d < splashR) {
+                  playOnce(explodeBuffer);
+                  explosionPieces.push(...explodeTank(tg.mesh, tg.rigidBody));
+                  targets = targets.filter((x) => x !== tg);
+                  if (enemies.length === 0 && turrets.length === 0 && targets.length === 0) {
+                    enemyDead = true;
+                    if (!winSpeechPlayed) {
+                      winSpeechPlayed = true;
+                      markDefeated(currentLevelId);
+                      setTimeout(() => playRandomFrom(winSpeechBuffers), 1000);
                     }
                   }
                 }
@@ -3147,7 +3315,7 @@ function animate() {
                     explosionPieces.push(...explodeTank(t.mesh, t.rigidBody));
                     if (t.laserLine) scene.remove(t.laserLine);
                     turrets = turrets.filter((x) => x !== t);
-                    if (enemies.length === 0 && turrets.length === 0) {
+                    if (enemies.length === 0 && turrets.length === 0 && targets.length === 0) {
                       enemyDead = true;
                       if (!winSpeechPlayed) {
                         winSpeechPlayed = true;
@@ -3239,7 +3407,21 @@ function animate() {
       const hitParent = hit?.collider?.parent?.();
       const hitEnemyLaser = !enemyDead ? enemies.find((e) => e.rigidBody && hitParent === e.rigidBody) : null;
       const hitTurretLaser = turrets.find((t) => t.rigidBody && hitParent === t.rigidBody);
-      if (hitEnemyLaser && hitEnemyLaser.health > 0 && (now - lastLaserDamageTime) >= beamDamageInterval) {
+      const hitTargetLaser = targets.find((t) => t.rigidBody && hitParent === t.rigidBody);
+      if (hitTargetLaser && (now - lastLaserDamageTime) >= beamDamageInterval) {
+        lastLaserDamageTime = now;
+        playOnce(explodeBuffer);
+        explosionPieces.push(...explodeTank(hitTargetLaser.mesh, hitTargetLaser.rigidBody));
+        targets = targets.filter((x) => x !== hitTargetLaser);
+        if (enemies.length === 0 && turrets.length === 0 && targets.length === 0) {
+          enemyDead = true;
+          if (!winSpeechPlayed) {
+            winSpeechPlayed = true;
+            markDefeated(currentLevelId);
+            setTimeout(() => playRandomFrom(winSpeechBuffers), 1000);
+          }
+        }
+      } else if (hitEnemyLaser && hitEnemyLaser.health > 0 && (now - lastLaserDamageTime) >= beamDamageInterval) {
         lastLaserDamageTime = now;
         hitEnemyLaser.health = takeDamage(hitEnemyLaser.rigidBody, hitEnemyLaser.health, beamDamagePerTick, 'secondary', null, null);
         hitEnemyLaser.hitFlashUntil = now + 0.12;
@@ -3248,7 +3430,7 @@ function animate() {
           playOnce(explodeBuffer);
           explosionPieces.push(...explodeTank(hitEnemyLaser.mesh, hitEnemyLaser.rigidBody));
           enemies = enemies.filter((x) => x !== hitEnemyLaser);
-          if (enemies.length === 0 && turrets.length === 0) {
+          if (enemies.length === 0 && turrets.length === 0 && targets.length === 0) {
             enemyDead = true;
             if (!winSpeechPlayed) {
               winSpeechPlayed = true;
@@ -3258,7 +3440,7 @@ function animate() {
           }
         }
       }
-      if (hitTurretLaser && hitTurretLaser.health > 0 && (now - lastLaserDamageTime) >= beamDamageInterval) {
+      if (!hitTargetLaser && hitTurretLaser && hitTurretLaser.health > 0 && (now - lastLaserDamageTime) >= beamDamageInterval) {
         lastLaserDamageTime = now;
         hitTurretLaser.health = takeDamage(hitTurretLaser.rigidBody, hitTurretLaser.health, beamDamagePerTick, 'secondary', null, null);
         hitTurretLaser.hitFlashUntil = now + 0.12;
@@ -3267,7 +3449,7 @@ function animate() {
           explosionPieces.push(...explodeTank(hitTurretLaser.mesh, hitTurretLaser.rigidBody));
           if (hitTurretLaser.laserLine) scene.remove(hitTurretLaser.laserLine);
           turrets = turrets.filter((x) => x !== hitTurretLaser);
-          if (enemies.length === 0 && turrets.length === 0) {
+          if (enemies.length === 0 && turrets.length === 0 && targets.length === 0) {
             enemyDead = true;
             if (!winSpeechPlayed) {
               winSpeechPlayed = true;
@@ -3277,7 +3459,7 @@ function animate() {
           }
         }
       }
-      const hitAnyEnemy = hit && (enemies.some((e) => e.rigidBody && hit.collider.parent() === e.rigidBody) || turrets.some((t) => t.rigidBody && hit.collider.parent() === t.rigidBody));
+      const hitAnyEnemy = hit && (enemies.some((e) => e.rigidBody && hit.collider.parent() === e.rigidBody) || turrets.some((t) => t.rigidBody && hit.collider.parent() === t.rigidBody) || targets.some((t) => t.rigidBody && hit.collider.parent() === t.rigidBody));
       if (hit && !hitAnyEnemy && (laserHoleCooldown -= dt) <= 0) {
         laserHoleCooldown = 0.1;
         const hitPoint = new THREE.Vector3(
@@ -3359,12 +3541,21 @@ function animate() {
   if (healthEl) healthEl.textContent = `${Math.round((playerHealth / playerHealthMaxDynamic) * 100)}%`;
   if (angleEl) angleEl.textContent = `${bodyAimPitch >= 0 ? '+' : ''}${Math.round(bodyAimPitch * (180 / Math.PI))}°`;
 
+  if (boostIndicatorEl) {
+    if (isBoosting && boostRemaining > 0) {
+      boostIndicatorEl.textContent = `BOOST ${boostRemaining.toFixed(2)}`;
+      boostIndicatorEl.classList.add('visible');
+    } else {
+      boostIndicatorEl.classList.remove('visible');
+    }
+  }
+
   const gameVisible = !document.getElementById('game-container')?.classList.contains('hidden');
   if (gameVisible) {
     const showNextBtn = nextLevelBtnEl && enemyDead && !playerDead && nextLevelIdForButton && !exitHatch;
     if (showNextBtn) nextLevelBtnEl.classList.remove('hidden');
     else if (nextLevelBtnEl) nextLevelBtnEl.classList.add('hidden');
-    if (youWinOverlayEl && enemyDead && !playerDead && !nextLevelIdForButton) youWinOverlayEl.classList.remove('hidden');
+    if (youWinOverlayEl && enemyDead && !playerDead && !nextLevelIdForButton && !exitHatch) youWinOverlayEl.classList.remove('hidden');
     else if (youWinOverlayEl) youWinOverlayEl.classList.add('hidden');
     if (lossOverlayEl && (playerDead || escapePauseActive)) lossOverlayEl.classList.remove('hidden');
     else if (lossOverlayEl) lossOverlayEl.classList.add('hidden');

@@ -54,7 +54,7 @@
                     "name": "Heavy Cannon",
                     "type": "cannon",
                     "damage": 50,
-                    "cooldown": 5,
+                    "cooldown": 2.5,
                     "ammoMax": 7,
                     "speed": 20,
                     "knockbackImpulse": 35
