@@ -2,38 +2,51 @@
   "levels": [
     {
       "id": "level-01",
-      "name": "Level 1",
+      "name": "Learn To Drive",
       "order": 1,
       "difficulty": 1,
-      "glbPath": "/assets/levels/level-01.glb"
+      "glbPath": "/assets/levels/level-01.glb",
+      "imagePath": "/assets/images/levels/level-01.png"
     },
     {
       "id": "level-02",
-      "name": "Level 2",
+      "name": "This Is Sparta!",
       "order": 2,
       "difficulty": 1,
-      "glbPath": "/assets/levels/level-02.glb"
+      "glbPath": "/assets/levels/level-02.glb",
+      "imagePath": "/assets/images/levels/level-02.png"
     },
     {
       "id": "level-03",
-      "name": "Level 3",
+      "name": "Zoom & Angle",
       "order": 3,
       "difficulty": 2,
-      "glbPath": "/assets/levels/level-03.glb"
+      "glbPath": "/assets/levels/level-03.glb",
+      "imagePath": "/assets/images/levels/level-03.png"
     },
     {
       "id": "level-04",
-      "name": "Level 4",
+      "name": "Fun With Ramps",
       "order": 4,
       "difficulty": 2,
-      "glbPath": "/assets/levels/level-04.glb"
+      "glbPath": "/assets/levels/level-04.glb",
+      "imagePath": "/assets/images/levels/level-04.png"
     },
     {
       "id": "level-05",
-      "name": "Level 5",
+      "name": "Tightwalk",
       "order": 5,
       "difficulty": 3,
-      "glbPath": "/assets/levels/level-05.glb"
+      "glbPath": "/assets/levels/level-05.glb",
+      "imagePath": "/assets/images/levels/level-05.png"
+    },
+    {
+      "id": "level-06",
+      "name": "Dizzy",
+      "order": 5,
+      "difficulty": 3,
+      "glbPath": "/assets/levels/level-06.glb",
+      "imagePath": "/assets/images/levels/level-06.png"
     }
   ]
 }

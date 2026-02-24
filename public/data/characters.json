@@ -19,7 +19,7 @@
                     "type": "cannon",
                     "damage": 25,
                     "cooldown": 3,
-                    "ammoMax": 20,
+                    "ammoMax": 5,
                     "speed": 25,
                     "knockbackImpulse": 25
                 }, {
@@ -31,7 +31,7 @@
                     "heatRate": 0.2,
                     "coolRate": 0.3,
                     "heatMax": 1,
-                    "range": 40
+                    "range": 25
                 }
             ]
         },
@@ -55,7 +55,7 @@
                     "type": "cannon",
                     "damage": 50,
                     "cooldown": 5,
-                    "ammoMax": 10,
+                    "ammoMax": 7,
                     "speed": 20,
                     "knockbackImpulse": 35
                 }
@@ -105,9 +105,9 @@
                     "id": "cannon",
                     "name": "Cannon",
                     "type": "cannon",
-                    "damage": 15,
+                    "damage": 25,
                     "cooldown": 2,
-                    "ammoMax": 25,
+                    "ammoMax": 12,
                     "speed": 28,
                     "knockbackImpulse": 20
                 }, {
@@ -136,9 +136,9 @@
                     "id": "cannon",
                     "name": "Cannon",
                     "type": "cannon",
-                    "damage": 28,
+                    "damage": 25,
                     "cooldown": 4,
-                    "ammoMax": 18,
+                    "ammoMax": 12,
                     "speed": 28,
                     "knockbackImpulse": 28
                 }, {

@@ -4,7 +4,7 @@ import { getCharacterGlbPath, getCharacterById } from './characters.js';
 import { isTouchMode } from './input-mode.js';
 import { loadKeybindings, getActionForKey, getKeyForAction, isKeyForAction } from './keybindings.js';
 import { showControlsIfFirstLevel01, showControlsModal, isControlsModalOpen } from './controls-modal.js';
-import { initMasterGain, stopMenuMusic } from './audio.js';
+import { initMasterGain } from './audio.js';
 
 // Resolve asset paths for both local dev (/) and GitHub Pages (/ttt/)
 const asset = (path) => import.meta.env.BASE_URL + path.replace(/^\//, '');
@@ -90,6 +90,7 @@ const enemySpeed = 6;
 const enemyTurnSpeed = 1;
 const enemyReverseSpeed = 2;
 const enemyShootRange = 50;
+const enemyEffectiveShootRange = 35;  // Only shoot when player is within this (avoids wasting shots at long range)
 const enemyStandoffDist = 12;  // Stop chasing and rotate to face when within this range
 const enemyShootCooldown = 10;
 const enemyAimThreshold = 0.92;
@@ -208,6 +209,14 @@ function getBarrelZBackExtent(barrel) {
   const box = new THREE.Box3().setFromObject(barrel);
   box.applyMatrix4(barrel.matrixWorld.clone().invert());
   return Math.max(0, box.max.z);
+}
+
+/** World position of barrel/weapon muzzle (front along local -Z). Works for Barrel or Weapon-Cannon. */
+function getBarrelTipWorld(barrel) {
+  if (!barrel) return null;
+  const box = new THREE.Box3().setFromObject(barrel);
+  box.applyMatrix4(barrel.matrixWorld.clone().invert());
+  return new THREE.Vector3(0, 0, box.min.z).applyMatrix4(barrel.matrixWorld);
 }
 
 /** Request weapon switch with barrel animation. Starts retract, then extend. */
@@ -422,6 +431,7 @@ let youWinOverlayEl = null;
 let escapePauseActive = false;
 let animateLoopStarted = false;
 let gameActive = false;
+let gameListenersBound = false;
 /** Touch joystick: { dx, dy } in [-1,1], rotates tank to face (mobile only) */
 let touchJoystickInput = { dx: 0, dy: 0 };
 /** Touch drive: { value } in [-1,1], drag up=forward down=back, distance=speed (mobile only) */
@@ -574,7 +584,7 @@ function createEnemyTank(tankTemplate, spawnPos = { x: 15, y: 2, z: 15 }, spawnR
     }
   });
   const body = enemy.getObjectByName('Body');
-  const barrel = enemy.getObjectByName('Barrel');
+  const barrel = enemy.getObjectByName('Barrel') || enemy.getObjectByName('Weapon-Cannon') || findWeaponBarrel(enemy, 'cannon');
   const wFL = enemy.getObjectByName('Wheel-FL');
   const wFR = enemy.getObjectByName('Wheel-FR');
   const wBL = enemy.getObjectByName('Wheel-BL');
@@ -601,7 +611,8 @@ function createEnemyTank(tankTemplate, spawnPos = { x: 15, y: 2, z: 15 }, spawnR
     mesh: enemy, body, barrel, wFL, wFR, wBL, wBR, rigidBody: rb, collider: col,
     health: enemyHealthMax, cannonCooldown: 0, engineTime: 0, stuckTimer: 0, hitJolt: 0,
     lastPos: { x: pos.x, y: pos.y ?? 2, z: pos.z }, knockbackVel: { x: 0, y: 0, z: 0 }, hitFlashUntil: 0,
-    pathTarget: null, path: [], pathUpdateTime: 0
+    pathTarget: null, path: [], pathUpdateTime: 0,
+    wheelRotL: 0, wheelRotR: 0, eTargetSpeed: 0, eTargetTurn: 0
   };
 }
 
@@ -727,6 +738,20 @@ function geometryToRapier(geometry, matrix) {
   return { vertices, indices };
 }
 
+/** Dispose a Three.js object and its descendants (geometry, material). Skips shared textures. */
+function disposeObject3D(obj) {
+  if (!obj) return;
+  obj.traverse((c) => {
+    if (c.geometry) c.geometry.dispose();
+    if (c.material) {
+      const mats = Array.isArray(c.material) ? c.material : [c.material];
+      for (const m of mats) {
+        m.dispose();
+      }
+    }
+  });
+}
+
 function stopGame() {
   gameActive = false;
   animateLoopStarted = false;
@@ -738,7 +763,6 @@ function stopGame() {
 }
 
 async function init(levelId = 'level-01', tankId = 'tank-01') {
-  stopMenuMusic();
   loadKeybindings();
   gameActive = true;
   currentLevelId = levelId;
@@ -827,6 +851,38 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   }
 
   // Cleanup previous level and game objects when re-initializing
+  // Dispose bullet holes (geometry is shared, only dispose material)
+  for (const { mesh } of bulletHoles) {
+    scene.remove(mesh);
+    mesh.material?.dispose?.();
+  }
+  bulletHoles.length = 0;
+
+  // Remove and dispose collisionBoxMesh from tank (avoids polluting cached tank)
+  if (collisionBoxMesh?.parent) {
+    collisionBoxMesh.parent.remove(collisionBoxMesh);
+    collisionBoxMesh.geometry?.dispose?.();
+    collisionBoxMesh.material?.dispose?.();
+    collisionBoxMesh = null;
+  }
+
+  // Dispose trajectory lines and markers we created (not from GLB cache)
+  for (const obj of [mgLine, cannonTrajectoryLine, laserTrajectoryLine, cannonTrajectoryEndSphere, empRadiusMarker]) {
+    if (obj?.parent) {
+      obj.parent.remove(obj);
+      disposeObject3D(obj);
+    }
+  }
+  if (muzzleLight?.parent) {
+    muzzleLight.parent.remove(muzzleLight);
+    muzzleLight = null;
+  }
+  mgLine = null;
+  cannonTrajectoryLine = null;
+  laserTrajectoryLine = null;
+  cannonTrajectoryEndSphere = null;
+  empRadiusMarker = null;
+
   const lights = scene.children.filter((c) => c.isLight);
   scene.children.slice().forEach((c) => {
     if (!c.isLight) scene.remove(c);
@@ -897,6 +953,9 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     const navmeshGeometry = navmeshGeometries.length === 1
       ? navmeshGeometries[0]
       : BufferGeometryUtils.mergeGeometries(navmeshGeometries);
+    if (navmeshGeometries.length > 1) {
+      navmeshGeometries.forEach((g) => g.dispose());
+    }
     pathfinding = new Pathfinding();
     pathfindingZoneId = 'level';
     pathfinding.setZoneData(pathfindingZoneId, Pathfinding.createZone(navmeshGeometry));
@@ -1450,8 +1509,14 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     nextLevelBtnEl.classList.add('next-level-btn', 'hidden');
     nextLevelBtnEl.addEventListener('click', async () => {
       nextLevelBtnEl.classList.add('hidden');
-      const nextId = await getNextLevelId(currentLevelId);
-      if (nextId) init(nextId, currentTankId);
+      const loadingEl = document.getElementById('loading-overlay');
+      if (loadingEl) loadingEl.classList.remove('hidden');
+      try {
+        const nextId = await getNextLevelId(currentLevelId);
+        if (nextId) await init(nextId, currentTankId);
+      } finally {
+        if (loadingEl) loadingEl.classList.add('hidden');
+      }
     });
     document.body.appendChild(nextLevelBtnEl);
   }
@@ -1461,9 +1526,15 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     lossOverlayEl.classList.add('loss-overlay', 'hidden');
     const retryBtn = document.createElement('button');
     retryBtn.textContent = 'Retry';
-    retryBtn.addEventListener('click', () => {
+    retryBtn.addEventListener('click', async () => {
       lossOverlayEl.classList.add('hidden');
-      init(currentLevelId, currentTankId);
+      const loadingEl = document.getElementById('loading-overlay');
+      if (loadingEl) loadingEl.classList.remove('hidden');
+      try {
+        await init(currentLevelId, currentTankId);
+      } finally {
+        if (loadingEl) loadingEl.classList.add('hidden');
+      }
     });
     const controlsBtn = document.createElement('button');
     controlsBtn.textContent = 'Controls';
@@ -1493,23 +1564,25 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     document.body.appendChild(youWinOverlayEl);
   }
 
-  window.addEventListener('resize', () => {
-    camera.aspect = innerWidth / innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(innerWidth, innerHeight);
-    composer.setSize(innerWidth, innerHeight);
-    if (mgLine?.material?.resolution) mgLine.material.resolution.set(innerWidth, innerHeight);
-    if (cannonTrajectoryLine?.material?.resolution) cannonTrajectoryLine.material.resolution.set(innerWidth, innerHeight);
-    if (laserTrajectoryLine?.material?.resolution) laserTrajectoryLine.material.resolution.set(innerWidth, innerHeight);
-    turrets.forEach((t) => { if (t.laserLine?.material?.resolution) t.laserLine.material.resolution.set(innerWidth, innerHeight); });
+  if (!gameListenersBound) {
+    gameListenersBound = true;
+    window.addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+      composer.setSize(innerWidth, innerHeight);
+      if (mgLine?.material?.resolution) mgLine.material.resolution.set(innerWidth, innerHeight);
+      if (cannonTrajectoryLine?.material?.resolution) cannonTrajectoryLine.material.resolution.set(innerWidth, innerHeight);
+      if (laserTrajectoryLine?.material?.resolution) laserTrajectoryLine.material.resolution.set(innerWidth, innerHeight);
+      turrets.forEach((t) => { if (t.laserLine?.material?.resolution) t.laserLine.material.resolution.set(innerWidth, innerHeight); });
 
-    // keep blur consistent on resize
-    hTilt.uniforms.h.value = 1 / innerWidth * 2.0;
-    vTilt.uniforms.v.value = 1 / innerHeight * 2.0;
-  });
+      // keep blur consistent on resize
+      hTilt.uniforms.h.value = 1 / innerWidth * 2.0;
+      vTilt.uniforms.v.value = 1 / innerHeight * 2.0;
+    });
 
-  document.addEventListener('click', () => { if (audioCtx.state === 'suspended') audioCtx.resume(); }, { once: true });
-  document.addEventListener('keydown', (e) => {
+    document.addEventListener('click', () => { if (audioCtx.state === 'suspended') audioCtx.resume(); }, { once: true });
+    document.addEventListener('keydown', (e) => {
     if (audioCtx.state === 'suspended') audioCtx.resume();
     if (isControlsModalOpen()) return;
     keys[e.code] = true;
@@ -1540,6 +1613,7 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
       camZoomFactor = Math.max(0.25, camZoomFactor * 0.5);
     }
     if (action === 'pause') {
+      if (e.repeat) return;
       e.preventDefault();
       const gameVisible = !document.getElementById('game-container')?.classList.contains('hidden');
       if (gameVisible && lossOverlayEl) {
@@ -1594,12 +1668,13 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   document.addEventListener('contextmenu', (e) => {
     if (gameActive && !isControlsModalOpen()) e.preventDefault();
   });
-  document.addEventListener('wheel', (e) => {
-    if (isControlsModalOpen()) return;
-    e.preventDefault();
-    const scrollScale = 0.002;
-    bodyAimPitch = Math.max(-bodyAimMax, Math.min(bodyAimMax, bodyAimPitch - e.deltaY * scrollScale));
-  }, { passive: false });
+    document.addEventListener('wheel', (e) => {
+      if (isControlsModalOpen()) return;
+      e.preventDefault();
+      const scrollScale = 0.002;
+      bodyAimPitch = Math.max(-bodyAimMax, Math.min(bodyAimMax, bodyAimPitch - e.deltaY * scrollScale));
+    }, { passive: false });
+  }
 
   showControlsIfFirstLevel01(!isTouchMode(), levelId);
 
@@ -1884,6 +1959,8 @@ function animate() {
     } else {
       e.stuckTimer = Math.max(0, e.stuckTimer - dt * 2);
     }
+    e.eTargetSpeed = eTargetSpeed;
+    e.eTargetTurn = eTargetTurn;
 
     const eLinVel = e.rigidBody.linvel();
     e.knockbackVel.x *= cannonKnockbackDecay;
@@ -1917,11 +1994,29 @@ function animate() {
     }
     e.cannonCooldown = Math.max(0, e.cannonCooldown - dt);
     const facingPlayer = dotToPlayer > enemyAimThreshold;
-    if (!enemyDisabled && dist < enemyShootRange && dist > 5 && e.cannonCooldown <= 0 && tankRigidBody && !playerDead && facingPlayer) {
+    const inShootRange = dist > 5 && dist < enemyEffectiveShootRange;
+    let hasLineOfSight = false;
+    if (inShootRange && facingPlayer && tankRigidBody) {
+      e.mesh.updateMatrixWorld(true);
+      const eBarrel = e.mesh.getObjectByName('Barrel') || e.mesh.getObjectByName('Weapon-Cannon') || findWeaponBarrel(e.mesh, 'cannon');
+      const eTip = getBarrelTipWorld(eBarrel) || new THREE.Vector3(ePos.x, ePos.y + 1, ePos.z);
+      const toPlayerFromBarrel = new THREE.Vector3(pPos.x - eTip.x, pPos.y - eTip.y, pPos.z - eTip.z);
+      const rayDist = toPlayerFromBarrel.length();
+      if (rayDist > 0.1) {
+        toPlayerFromBarrel.divideScalar(rayDist);
+        const losRay = new RAPIER.Ray(
+          { x: eTip.x, y: eTip.y, z: eTip.z },
+          { x: toPlayerFromBarrel.x, y: toPlayerFromBarrel.y, z: toPlayerFromBarrel.z }
+        );
+        const losHit = world.castRayAndGetNormal(losRay, rayDist + 0.5, true, null, null, null, e.rigidBody);
+        hasLineOfSight = losHit && losHit.collider.parent() === tankRigidBody && losHit.toi <= rayDist + 0.3;
+      }
+    }
+    if (!enemyDisabled && inShootRange && hasLineOfSight && e.cannonCooldown <= 0 && tankRigidBody && !playerDead && facingPlayer) {
       e.cannonCooldown = enemyShootCooldown;
       e.mesh.updateMatrixWorld(true);
-      const eBarrel = e.mesh.getObjectByName('Barrel');
-      const eTip = eBarrel ? new THREE.Vector3(0, 0, -0.5).applyMatrix4(eBarrel.matrixWorld) : new THREE.Vector3(ePos.x, ePos.y, ePos.z);
+      const eBarrel = e.mesh.getObjectByName('Barrel') || e.mesh.getObjectByName('Weapon-Cannon') || findWeaponBarrel(e.mesh, 'cannon');
+      const eTip = getBarrelTipWorld(eBarrel) || new THREE.Vector3(ePos.x, ePos.y + 1, ePos.z);
       playOnce(shootBuffer);
       const eLinVelRB = e.rigidBody.linvel();
       const cb = {
@@ -1969,7 +2064,30 @@ function animate() {
     t.laserCooldown = Math.max(0, t.laserCooldown - dt);
     t.laserShootingUntil = Math.max(0, t.laserShootingUntil - dt);
     const inRange = dist <= turretLaserRange && tankRigidBody && !playerDead;
-    const canStartShot = inRange && !enemyDisabled && t.laserCooldown <= 0 && t.laserShootingUntil <= 0;
+    let turretHasLOS = false;
+    if (inRange && (t.head || t.laserOrigin)) {
+      let headTip, headForward;
+      if (t.laserOrigin) {
+        headTip = t.laserOrigin.getWorldPosition(new THREE.Vector3());
+        headForward = t.laserOrigin.getWorldDirection(new THREE.Vector3());
+      } else {
+        headTip = new THREE.Vector3(0, 0, 0.5).applyMatrix4(t.head.matrixWorld);
+        headForward = new THREE.Vector3(0, 0, 1).applyQuaternion(t.head.getWorldQuaternion(new THREE.Quaternion()));
+      }
+      const toPlayerFromTurret = new THREE.Vector3(pPos.x - headTip.x, pPos.y - headTip.y, pPos.z - headTip.z);
+      const rayDist = toPlayerFromTurret.length();
+      if (rayDist > 0.1) {
+        toPlayerFromTurret.divideScalar(rayDist);
+        const aimedAtPlayer = headForward.dot(toPlayerFromTurret) > enemyAimThreshold;
+        const losRay = new RAPIER.Ray(
+          { x: headTip.x, y: headTip.y, z: headTip.z },
+          { x: toPlayerFromTurret.x, y: toPlayerFromTurret.y, z: toPlayerFromTurret.z }
+        );
+        const losHit = world.castRayAndGetNormal(losRay, rayDist + 0.5, true, null, null, null, t.rigidBody);
+        turretHasLOS = aimedAtPlayer && losHit && losHit.collider.parent() === tankRigidBody && losHit.toi <= rayDist + 0.3;
+      }
+    }
+    const canStartShot = inRange && turretHasLOS && !enemyDisabled && t.laserCooldown <= 0 && t.laserShootingUntil <= 0;
     if (canStartShot) {
       t.laserShootingUntil = turretLaserDuration;
       t.laserCooldown = turretLaserCooldown;
@@ -2183,6 +2301,10 @@ function animate() {
       const hitShake = e.hitJolt * Math.sin(e.engineTime * 12);
       e.body.position.y = baseBounce + hitShake;
     }
+    e.wheelRotL += (-e.eTargetSpeed - e.eTargetTurn * turnWheelFactor) * dt * wheelSpeed;
+    e.wheelRotR += (-e.eTargetSpeed + e.eTargetTurn * turnWheelFactor) * dt * wheelSpeed;
+    [e.wFL, e.wBL].forEach((w) => { if (w) w.rotation.x = e.wheelRotL; });
+    [e.wFR, e.wBR].forEach((w) => { if (w) w.rotation.x = e.wheelRotR; });
   }
 
   for (const t of turrets) {
@@ -2489,7 +2611,7 @@ function animate() {
     muzzleLight.intensity = Math.max(0, muzzleLight.intensity - 120 * dt);
   }
 
-  if (!playerDead && !enemyDead && tankRigidBody && barrelGroup && tankMesh) {
+  if (!playerDead && !enemyDead && tankRigidBody && barrelGroup && tankMesh && cannonTrajectoryLine && laserTrajectoryLine) {
     const fd = fireForward.clone().normalize();
     const trajW = getWeapon(weaponMode);
     const showProjectileTrajectory = trajW && isProjectileWeapon(trajW);

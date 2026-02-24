@@ -253,12 +253,15 @@ function buildLevelGrid() {
     backBtn.onmouseenter = playQuickClick;
   }
   getLevels().then((levels) => {
-    levelList.innerHTML = levels.map((l) =>
-      `<div class="level-card ${l.unlocked ? '' : 'locked'}" data-level="${l.id}" data-selectable="${l.unlocked}" data-difficulty="${l.difficulty ?? 1}">
-        <div class="level-card-img">${l.order}</div>
+    levelList.innerHTML = levels.map((l) => {
+      const imgHtml = l.imagePath
+        ? `<img src="${asset(l.imagePath)}" alt="${l.name}">`
+        : l.order;
+      return `<div class="level-card ${l.unlocked ? '' : 'locked'}" data-level="${l.id}" data-selectable="${l.unlocked}" data-difficulty="${l.difficulty ?? 1}">
+        <div class="level-card-img">${imgHtml}</div>
         <span class="level-card-name">${l.name}</span>
-      </div>`
-    ).join('');
+      </div>`;
+    }).join('');
 
     levelList.querySelectorAll('.level-card').forEach((card) => {
       card.addEventListener('click', () => {
