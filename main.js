@@ -282,8 +282,8 @@ hTilt.uniforms.h.value = .1 / innerWidth * 30.0;
 vTilt.uniforms.v.value = .1 / innerHeight * 30.0;
 
 // Add passes
-composer.addPass(hTilt);
-composer.addPass(vTilt);
+// composer.addPass(hTilt);
+// composer.addPass(vTilt);
 composer.addPass(new OutputPass()); // Tone mapping + sRGB for correct display (skipped when rendering to RT)
 
 const light = new THREE.DirectionalLight(0xffffff, 2);
@@ -323,6 +323,7 @@ let weaponSwitchToBarrel = null;
 let weaponSwitchFromType = null;
 let weaponSwitchToType = null;
 let cannonAmmo = cannonAmmoMax;
+let minigunAmmo = 150;
 let cannonCooldown = 0;
 let weapon2Cooldown = 0;
 let mgOverheated = false;
@@ -610,11 +611,11 @@ function createTurret(turretTemplate, spawnPos = { x: 10, y: 0, z: 10 }, spawnRo
   if (spawnRot && (spawnRot instanceof THREE.Quaternion || spawnRot.w !== undefined)) {
     turret.quaternion.copy(spawnRot instanceof THREE.Quaternion ? spawnRot : new THREE.Quaternion(spawnRot.x, spawnRot.y, spawnRot.z, spawnRot.w));
   }
-  const collider = RAPIER.ColliderDesc.cylinder(1, 1.6);
+  const collider = RAPIER.ColliderDesc.cylinder(1, 2.4);
   const rb = world.createRigidBody(
     RAPIER.RigidBodyDesc.fixed()
   );
-  rb.setTranslation({ x: pos.x, y: pos.y + 1, z: pos.z }, true);
+  rb.setTranslation({ x: pos.x, y: pos.y + 1.3, z: pos.z }, true);
   if (spawnRot && (spawnRot instanceof THREE.Quaternion || spawnRot.w !== undefined)) {
     rb.setRotation(spawnRot instanceof THREE.Quaternion ? { x: spawnRot.x, y: spawnRot.y, z: spawnRot.z, w: spawnRot.w } : spawnRot, true);
   }
@@ -749,7 +750,9 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   playerMaxSpeed = playerCharacter?.speed ?? maxSpeed;
   playerAccelRate = playerCharacter?.acceleration ?? accelRate;
   const w1 = getWeapon(1);
-  cannonAmmo = w1?.ammoMax ?? cannonAmmoMax;
+  const w2 = getWeapon(2);
+  cannonAmmo = (w1?.type === 'cannon' || w1?.type === 'mortar') ? (w1?.ammoMax ?? cannonAmmoMax) : (w2?.type === 'cannon' || w2?.type === 'mortar') ? (w2?.ammoMax ?? cannonAmmoMax) : cannonAmmoMax;
+  minigunAmmo = (w1?.type === 'minigun' ? w1?.ammoMax : w2?.type === 'minigun' ? w2?.ammoMax : null) ?? 150;
   cannonCooldown = 0;
   weapon2Cooldown = 0;
   mgHeat = 0;
@@ -889,18 +892,23 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     if (c.isMesh) c.castShadow = c.receiveShadow = true;
   });
 
-  const tankCollider = RAPIER.ColliderDesc.cuboid(tankColliderSize.x, tankColliderSize.y, tankColliderSize.z)
+  const colliderSize = playerCharacter?.hitbox ?? tankColliderSize;
+  const colliderOffset = playerCharacter?.hitbox
+    ? { x: 0, y: colliderSize.y - 0.5, z: 0 }
+    : tankColliderOffset;
+
+  const tankCollider = RAPIER.ColliderDesc.cuboid(colliderSize.x, colliderSize.y, colliderSize.z)
     .setMass(200)
     .setFriction(1.2)
     .setRestitution(0.1)
-    .setTranslation(tankColliderOffset.x, tankColliderOffset.y, tankColliderOffset.z);
+    .setTranslation(colliderOffset.x, colliderOffset.y, colliderOffset.z);
 
-  const boxGeo = new THREE.BoxGeometry(tankColliderSize.x * 2, tankColliderSize.y * 2, tankColliderSize.z * 2);
+  const boxGeo = new THREE.BoxGeometry(colliderSize.x * 2, colliderSize.y * 2, colliderSize.z * 2);
   collisionBoxMesh = new THREE.LineSegments(
     new EdgesGeometry(boxGeo),
     new THREE.LineBasicMaterial({ color: 0x00ff00 })
   );
-  collisionBoxMesh.position.set(tankColliderOffset.x, tankColliderOffset.y, tankColliderOffset.z);
+  collisionBoxMesh.position.set(colliderOffset.x, colliderOffset.y, colliderOffset.z);
   collisionBoxMesh.visible = showCollisionBox;
   tankMesh.add(collisionBoxMesh);
 
@@ -1014,6 +1022,8 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     linewidth: 0.12,
     worldUnits: true,
     vertexColors: true,
+    transparent: true,
+    opacity: 0.95,
     resolution: new THREE.Vector2(innerWidth, innerHeight)
   });
   mgLine = new Line2(mgGeo, mgMat);
@@ -1462,7 +1472,9 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
       const canFireProjectile = !playerDead && weaponMode === 1 && w1 && isProjectileWeapon(w1) && cannonAmmo > 0 && cannonCooldown <= 0 && !e.repeat;
       const canFireMortar = !playerDead && weaponMode === 2 && w2?.type === 'mortar' && cannonAmmo > 0 && weapon2Cooldown <= 0 && !e.repeat;
       const canFireEMP = !playerDead && weaponMode === 2 && w2?.type === 'emp' && weapon2Cooldown <= 0 && !e.repeat;
-      const canFireHeatBeam = !playerDead && (weaponMode === 1 || weaponMode === 2) && isHeatBeamWeapon(getWeapon(weaponMode)) && mgHeat < (getWeapon(weaponMode)?.heatMax ?? 1) && !mgOverheated;
+      const hbW = getWeapon(weaponMode);
+      const canFireHeatBeam = !playerDead && (weaponMode === 1 || weaponMode === 2) && isHeatBeamWeapon(hbW) &&
+        (hbW?.type === 'minigun' ? minigunAmmo > 0 : mgHeat < (hbW?.heatMax ?? 1) && !mgOverheated);
       if (canFireProjectile || canFireMortar || canFireEMP) barrelRecoil = 1;
       if (canFireProjectile) fireCannonPending = true;
       if (canFireMortar) fireMortarPending = true;
@@ -1506,7 +1518,9 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
       const canFireProjectile = !playerDead && weaponMode === 1 && w1 && isProjectileWeapon(w1) && cannonAmmo > 0 && cannonCooldown <= 0;
       const canFireMortar = !playerDead && weaponMode === 2 && w2?.type === 'mortar' && cannonAmmo > 0 && weapon2Cooldown <= 0;
       const canFireEMP = !playerDead && weaponMode === 2 && w2?.type === 'emp' && weapon2Cooldown <= 0;
-      const canFireHeatBeam = !playerDead && (weaponMode === 1 || weaponMode === 2) && isHeatBeamWeapon(getWeapon(weaponMode)) && mgHeat < (getWeapon(weaponMode)?.heatMax ?? 1) && !mgOverheated;
+      const hbW = getWeapon(weaponMode);
+      const canFireHeatBeam = !playerDead && (weaponMode === 1 || weaponMode === 2) && isHeatBeamWeapon(hbW) &&
+        (hbW?.type === 'minigun' ? minigunAmmo > 0 : mgHeat < (hbW?.heatMax ?? 1) && !mgOverheated);
       if (canFireProjectile || canFireMortar || canFireEMP) barrelRecoil = 1;
       if (canFireProjectile) fireCannonPending = true;
       if (canFireMortar) fireMortarPending = true;
@@ -1629,30 +1643,55 @@ function animate() {
 
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(qCurrent);
 
+  // Ground and wall checks (before velocity) - used for ground alignment and to avoid driving into walls while falling
+  let hit = null;
+  let hittingWall = false;
+  if (tankRigidBody) {
+    const ray = new RAPIER.Ray(
+      { x: pos.x, y: pos.y + 1, z: pos.z },
+      { x: 0, y: -1, z: 0 }
+    );
+    hit = world.castRayAndGetNormal(ray, 3, true, null, null, null, tankRigidBody);
+
+    if (!playerDead && Math.abs(currentSpeed) > 1) {
+      const fwdDir = currentSpeed > 0 ? forward : forward.clone().negate();
+      const fwdRay = new RAPIER.Ray(
+        { x: pos.x + fwdDir.x * 0.5, y: pos.y, z: pos.z + fwdDir.z * 0.5 },
+        { x: fwdDir.x, y: 0, z: fwdDir.z }
+      );
+      const fwdHit = world.castRay(fwdRay, 2.5, true, null, null, null, tankRigidBody);
+      const hitEnemy = fwdHit && (enemies.some((e) => e.rigidBody && fwdHit.collider.parent() === e.rigidBody) || turrets.some((t) => t.rigidBody && fwdHit.collider.parent() === t.rigidBody));
+      hittingWall = fwdHit && !hitEnemy;
+    }
+  }
+
+  // When airborne and hitting wall: don't apply horizontal velocity toward wall (prevents getting stuck)
+  const effectiveSpeed = (hit || !hittingWall) ? currentSpeed : 0;
+
   if (tankRigidBody) {
     const linVel = tankRigidBody.linvel();
     playerKnockbackVel.x *= cannonKnockbackDecay;
     playerKnockbackVel.y *= cannonKnockbackDecay;
     playerKnockbackVel.z *= cannonKnockbackDecay;
+    // When airborne: preserve momentum, no drive/turn input (wheels not on ground)
+    const vx = hit ? forward.x * effectiveSpeed + playerKnockbackVel.x : linVel.x + playerKnockbackVel.x;
+    const vz = hit ? forward.z * effectiveSpeed + playerKnockbackVel.z : linVel.z + playerKnockbackVel.z;
     tankRigidBody.setLinvel(
       {
-        x: forward.x * currentSpeed + playerKnockbackVel.x,
+        x: vx,
         y: linVel.y + playerKnockbackVel.y,
-        z: forward.z * currentSpeed + playerKnockbackVel.z
+        z: vz
       },
       true
     );
-    tankRigidBody.setAngvel({ x: 0, y: currentTurnSpeed, z: 0 }, true);
+    const angVel = tankRigidBody.angvel();
+    tankRigidBody.setAngvel(
+      hit ? { x: 0, y: currentTurnSpeed, z: 0 } : { x: angVel.x, y: angVel.y, z: angVel.z },
+      true
+    );
   }
 
   if (tankRigidBody) {
-  const ray = new RAPIER.Ray(
-    { x: pos.x, y: pos.y + 1, z: pos.z },
-    { x: 0, y: -1, z: 0 }
-  );
-
-  const hit = world.castRayAndGetNormal(ray, 3, true, null, null, null, tankRigidBody);
-
   if (hit) {
     const normal = new THREE.Vector3(hit.normal.x, hit.normal.y, hit.normal.z).normalize();
     const projectedForward = forward.clone().projectOnPlane(normal).normalize();
@@ -1671,22 +1710,12 @@ function animate() {
   }
 
   // Wall collision thud: when moving and hitting static geometry (only on first impact, not while continually pressing)
-  if (!playerDead && tankRigidBody && Math.abs(currentSpeed) > 1) {
-    const fwdDir = currentSpeed > 0 ? forward : forward.clone().negate();
-    const fwdRay = new RAPIER.Ray(
-      { x: pos.x + fwdDir.x * 0.5, y: pos.y, z: pos.z + fwdDir.z * 0.5 },
-      { x: fwdDir.x, y: 0, z: fwdDir.z }
-    );
-    const fwdHit = world.castRay(fwdRay, 2.5, true, null, null, null, tankRigidBody);
-    const hitEnemy = fwdHit && (enemies.some((e) => e.rigidBody && fwdHit.collider.parent() === e.rigidBody) || turrets.some((t) => t.rigidBody && fwdHit.collider.parent() === t.rigidBody));
-    const hittingWall = fwdHit && !hitEnemy;
-    if (hittingWall && !wallHittingLastFrame) {
-      playOnce(thudBuffer);
-    }
-    wallHittingLastFrame = hittingWall;
+  if (hittingWall && !wallHittingLastFrame) {
+    playOnce(thudBuffer);
+  }
+  wallHittingLastFrame = hittingWall;
   } else {
     wallHittingLastFrame = false;
-  }
   }
 
   const now = performance.now() / 1000;
@@ -1816,15 +1845,18 @@ function animate() {
     const dist = toPlayer.length();
     if (dist < 0.01) continue;
     toPlayer.normalize();
-    if (t.head) {
-      const targetAngle = Math.atan2(toPlayer.x, -toPlayer.z);
+    const enemyDisabled = now < enemyDisabledUntil;
+    if (t.head && !enemyDisabled) {
+      const baseOrMesh = t.base || t.mesh;
+      const invQuat = baseOrMesh.getWorldQuaternion(new THREE.Quaternion()).invert();
+      const toPlayerLocal = toPlayer.clone().applyQuaternion(invQuat);
+      const targetAngle = Math.atan2(toPlayerLocal.x, -toPlayerLocal.z);
       const turnSpeed = 6 * dt;
       let angleDiff = targetAngle - t.head.rotation.y;
       while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
       while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
       t.head.rotation.y += Math.sign(angleDiff) * Math.min(Math.abs(angleDiff), turnSpeed);
     }
-    const enemyDisabled = now < enemyDisabledUntil;
     t.laserCooldown = Math.max(0, t.laserCooldown - dt);
     t.laserShootingUntil = Math.max(0, t.laserShootingUntil - dt);
     const inRange = dist <= turretLaserRange && tankRigidBody && !playerDead;
@@ -1963,7 +1995,7 @@ function animate() {
     }
     // Ammo pickup collection (refills to max)
     const w1 = getWeapon(1);
-    const ammoMax = w1?.ammoMax ?? cannonAmmoMax;
+    const w2 = getWeapon(2);
     for (const p of ammoPickups) {
       if (p.collected) continue;
       const dx = p.mesh.position.x - posFinal.x;
@@ -1973,7 +2005,11 @@ function animate() {
       if (distSq < ammoPickupRadius * ammoPickupRadius) {
         p.collected = true;
         scene.remove(p.mesh);
-        cannonAmmo = ammoMax;
+        if (w1?.type === 'minigun') minigunAmmo = w1.ammoMax ?? 150;
+        else if (w1?.type === 'cannon' || w1?.type === 'mortar') cannonAmmo = w1.ammoMax ?? cannonAmmoMax;
+        else if (w2?.type === 'minigun') minigunAmmo = w2.ammoMax ?? 150;
+        else if (w2?.type === 'cannon' || w2?.type === 'mortar') cannonAmmo = w2.ammoMax ?? cannonAmmoMax;
+        else cannonAmmo = cannonAmmoMax;
         playOnce(repairBuffer);
       }
     }
@@ -2180,7 +2216,9 @@ function animate() {
   }
 
   const heatBeamW = getWeapon(weaponMode);
-  const heatBeamActive = heatBeamW && isHeatBeamWeapon(heatBeamW) && isKeyForAction(keys, 'fire') && mgHeat < (heatBeamW.heatMax ?? 1) && !mgOverheated;
+  const isMinigunWeapon = heatBeamW?.type === 'minigun';
+  const heatBeamActive = heatBeamW && isHeatBeamWeapon(heatBeamW) && isKeyForAction(keys, 'fire') &&
+    (isMinigunWeapon ? minigunAmmo > 0 : mgHeat < (heatBeamW.heatMax ?? 1) && !mgOverheated);
   if (barrelGroup && !playerDead && tankMesh && weaponSwitchPhase === 'idle') {
     if (!heatBeamActive) {
       barrelRecoil = Math.max(0, barrelRecoil - recoilSpeed * dt);
@@ -2194,14 +2232,23 @@ function animate() {
   }
 
   if (tankMesh) tankMesh.updateMatrixWorld(true);
-  // Use active barrel for tip; laser/minigun may be at floor so use cannon/fallback for heat beam origin
+  // Use active weapon's barrel for tip; laser barrel may be at floor level so use cannon for height
   const heatBeamWeaponSelected = heatBeamW && isHeatBeamWeapon(heatBeamW);
   const cannonBarrel = weaponBarrels['cannon'];
-  const barrelForTip = heatBeamWeaponSelected ? (cannonBarrel || fallbackBarrel || bodyGroup || barrelGroup) : barrelGroup;
-  let barrelTip = barrelForTip && tankMesh ? new THREE.Vector3(0, 0, -0.5).applyMatrix4(barrelForTip.matrixWorld) : new THREE.Vector3(posFinal.x, posFinal.y, posFinal.z);
-  // Minigun-only tanks (e.g. tank-03) have no cannon barrel; fallback may be at floor — clamp to tank height
-  if (heatBeamWeaponSelected && !cannonBarrel && barrelTip.y < posFinal.y + 0.5) {
-    barrelTip = new THREE.Vector3(barrelTip.x, posFinal.y + 1.0, barrelTip.z);
+  const activeHeatBeamBarrel = heatBeamW ? weaponBarrels[heatBeamW.type] : null;
+  const barrelForTip = heatBeamWeaponSelected
+    ? (heatBeamW?.type === 'laser' && cannonBarrel ? cannonBarrel : activeHeatBeamBarrel || cannonBarrel || fallbackBarrel || bodyGroup || barrelGroup)
+    : barrelGroup;
+  let barrelTip;
+  if (barrelForTip && tankMesh) {
+    if (heatBeamWeaponSelected && heatBeamW?.type === 'minigun') {
+      const box = new THREE.Box3().setFromObject(barrelForTip);
+      barrelTip = box.getCenter(new THREE.Vector3());
+    } else {
+      barrelTip = new THREE.Vector3(0, 0, -0.5).applyMatrix4(barrelForTip.matrixWorld);
+    }
+  } else {
+    barrelTip = new THREE.Vector3(posFinal.x, posFinal.y, posFinal.z);
   }
   const fireForward = (barrelGroup || barrelForTip) && tankMesh
     ? new THREE.Vector3(0, 0, -1).clone().transformDirection((barrelGroup || barrelForTip).matrixWorld)
@@ -2401,7 +2448,8 @@ function animate() {
       if (cannonTrajectoryEndSphere) cannonTrajectoryEndSphere.visible = false;
       const beamRangeTraj = heatBeamW?.range ?? mgRange;
       const beamHeatMaxTraj = heatBeamW?.heatMax ?? mgHeatMax;
-      const showLaserPreview = !isKeyForAction(keys, 'fire') || mgHeat >= beamHeatMaxTraj || mgOverheated;
+      const showLaserPreview = !isKeyForAction(keys, 'fire') ||
+        (isMinigunWeapon ? minigunAmmo <= 0 : mgHeat >= beamHeatMaxTraj || mgOverheated);
       if (showLaserPreview) {
         laserTrajectoryLine.visible = true;
         const end = new THREE.Vector3(barrelTip.x + fd.x * beamRangeTraj, barrelTip.y + fd.y * beamRangeTraj, barrelTip.z + fd.z * beamRangeTraj);
@@ -2630,14 +2678,22 @@ function animate() {
   const beamDamagePerTick = heatBeamW?.damagePerTick ?? laserDamagePerTick;
   const beamDamageInterval = heatBeamW?.damageInterval ?? laserDamageInterval;
   const isMinigun = heatBeamW?.type === 'minigun';
+  const beamAmmoDrainRate = heatBeamW?.ammoDrainRate ?? 50;
 
-  if (wantsToFireHeatBeam && mgHeat < beamHeatMax && !mgOverheated) {
-    mgHeat = Math.min(beamHeatMax, mgHeat + beamHeatRate * dt);
-    if (mgHeat >= beamHeatMax) {
-      mgOverheated = true;
-      playOnce(hissBuffer);
+  const canFireMinigun = isMinigun && minigunAmmo > 0;
+  const canFireLaser = !isMinigun && mgHeat < beamHeatMax && !mgOverheated;
+
+  if (wantsToFireHeatBeam && (canFireMinigun || canFireLaser)) {
+    if (!isMinigun) {
+      mgHeat = Math.min(beamHeatMax, mgHeat + beamHeatRate * dt);
+      if (mgHeat >= beamHeatMax) {
+        mgOverheated = true;
+        playOnce(hissBuffer);
+      }
+    } else {
+      minigunAmmo = Math.max(0, minigunAmmo - beamAmmoDrainRate * dt);
     }
-    if (mgHeat < beamHeatMax) {
+    if (canFireMinigun || canFireLaser) {
       startHeatBeamSound(isMinigun);
       const strobe = isMinigun ? (0.5 + 0.5 * Math.sin(now * 40)) : 1;
       const baseIntensity = isMinigun ? 14 : 12;
@@ -2721,8 +2777,8 @@ function animate() {
         const bright = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(t + (1 - f) * 8));
         if (isMinigun) {
           const stripe = 0.5 + 0.5 * Math.sin(f * 35 - animT);
-          const fade = 1 - f;
-          colArr.push(stripe * fade, stripe * fade, stripe * fade);
+          const fade = Math.pow(1 - f, 1.2);
+          colArr.push(stripe * fade, stripe * fade, 0);
         } else {
           colArr.push(bright, bright * 0.4, 0);
         }
@@ -2762,6 +2818,7 @@ function animate() {
       const cd = w.type === 'cannon' ? cannonCooldown : weapon2Cooldown;
       return `Ammo: ${cannonAmmo}${cd > 0 ? ` (${cd.toFixed(1)}s)` : ''}`;
     }
+    if (w.type === 'minigun') return `Ammo: ${minigunAmmo}`;
     if (isHeatBeamWeapon(w)) return `Heat: ${heatPct}%`;
     if (w.type === 'emp') return `Cooldown: ${weapon2Cooldown > 0 ? weapon2Cooldown.toFixed(1) + 's' : 'Ready'}`;
     return '—';

@@ -16,6 +16,15 @@ let selectedTankId = 'tank-01';
 let characters = [];
 let tankIndex = 0;
 
+// Preload splash speech so it's ready when the logo animation plays
+let preloadedSplashAudio = null;
+function preloadSplashAudio() {
+  if (preloadedSplashAudio) return;
+  preloadedSplashAudio = new Audio(asset('/assets/audio/speech/teenytinytanks.mp3'));
+  preloadedSplashAudio.preload = 'auto';
+  preloadedSplashAudio.load();
+}
+
 function playQuickClick() {
   const snd = new Audio(asset('/assets/audio/quickclick.mp3'));
   snd.volume = getEffectiveSfxVolume();
@@ -194,7 +203,8 @@ async function runLogoAnimation() {
       // Play theme when first word lands (55% through animation)
       if (i === 0) {
         setTimeout(() => {
-          const snd = new Audio(asset('/assets/audio/speech/teenytinytanks.mp3'));
+          const snd = preloadedSplashAudio || new Audio(asset('/assets/audio/speech/teenytinytanks.mp3'));
+          snd.currentTime = 0;
           snd.volume = getEffectiveSfxVolume();
           snd.play().catch(() => {});
         }, DROP_DURATION * 0.55);
@@ -286,6 +296,7 @@ function initVolumeSliders() {
 
 document.addEventListener('DOMContentLoaded', async () => {
   setAssetFn(asset);
+  preloadSplashAudio();
   initVolumeSliders();
   if (devmode) {
     document.getElementById('splash').classList.add('hidden');
