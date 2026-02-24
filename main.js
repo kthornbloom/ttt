@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { getLevelGlbPath, getNextLevelId, markDefeated } from './levels.js';
+import { getLevelGlbPath, getNextLevelId, markDefeated, getLevelById } from './levels.js';
 import { getCharacterGlbPath, getCharacterById } from './characters.js';
 import { isTouchMode } from './input-mode.js';
 import { loadKeybindings, getActionForKey, getKeyForAction, isKeyForAction } from './keybindings.js';
@@ -98,6 +98,7 @@ const enemyStuckDist = 2;
 const enemyStuckTime = 0.8;
 const enemyPathUpdateInterval = 0.25;
 const enemyWaypointReachDist = 2.5;
+const enemyPathLookAhead = 3;  // Steer toward waypoint N ahead (smoother curves; 1 = sharp turns)
 const enemyMoveAlignThreshold = 0.6;   // Must face target before moving forward (allows quicker turn onto path around void)
 const turretLaserRange = 25;
 const turretLaserDuration = 0.5;
@@ -420,6 +421,7 @@ let winSpeechPlayed = false;
 let lossSpeechPlayed = false;
 let currentLevelId = 'level-01';
 let currentTankId = 'tank-01';
+let currentLevelPathLookAhead = enemyPathLookAhead;  // Per-level override for curved vs straight paths
 let playerCharacter = null;
 let playerHealthMaxDynamic = 100;
 let playerMaxSpeed = 15;
@@ -889,6 +891,9 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   });
 
   world = new RAPIER.World(new RAPIER.Vector3(0, -9.81, 0));
+
+  const levelConfig = await getLevelById(levelId);
+  currentLevelPathLookAhead = levelConfig?.pathLookAhead ?? enemyPathLookAhead;
 
   // Load Level
   const levelPath = await getLevelGlbPath(levelId);
@@ -1708,6 +1713,16 @@ function animate() {
 
   const pos = tankRigidBody ? tankRigidBody.translation() : { x: 0, y: 0, z: 0 };
 
+  // Ground check (early) - used to freeze drive state when airborne and for velocity logic
+  let hit = null;
+  if (tankRigidBody) {
+    const groundRay = new RAPIER.Ray(
+      { x: pos.x, y: pos.y + 1, z: pos.z },
+      { x: 0, y: -1, z: 0 }
+    );
+    hit = world.castRayAndGetNormal(groundRay, 3, true, null, null, null, tankRigidBody);
+  }
+
   // Mobile: joystick rotates tank, drive zone (drag up/down) controls speed. Desktop: keys.
   const joystickActive = isTouchMode() && (touchJoystickInput.dx !== 0 || touchJoystickInput.dy !== 0);
   const driveActive = isTouchMode() && touchDriveInput.value !== 0;
@@ -1750,8 +1765,11 @@ function animate() {
   const speedRate = targetSpeed !== 0 ? playerAccelRate : (enemyDead ? 8 : decelRateForward);
   const turnRate = targetTurn !== 0 ? playerAccelRate : (enemyDead ? 8 : decelRateTurn);
 
-  currentSpeed += (targetSpeed * speedMult - currentSpeed) * Math.min(1, speedRate * dt);
-  currentTurnSpeed += (targetTurn - currentTurnSpeed) * Math.min(1, turnRate * dt);
+  // Only update drive state when grounded; when airborne, freeze so holding Back doesn't "charge" reverse
+  if (hit) {
+    currentSpeed += (targetSpeed * speedMult - currentSpeed) * Math.min(1, speedRate * dt);
+    currentTurnSpeed += (targetTurn - currentTurnSpeed) * Math.min(1, turnRate * dt);
+  }
 
   if (!playerDead && !enemyDead && tankRigidBody) {
     if (isKeyForAction(keys, 'resetAim')) {
@@ -1767,16 +1785,9 @@ function animate() {
 
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(qCurrent);
 
-  // Ground and wall checks (before velocity) - used for ground alignment and to avoid driving into walls while falling
-  let hit = null;
+  // Wall check (forward ray) - used to avoid driving into walls while falling
   let hittingWall = false;
   if (tankRigidBody) {
-    const ray = new RAPIER.Ray(
-      { x: pos.x, y: pos.y + 1, z: pos.z },
-      { x: 0, y: -1, z: 0 }
-    );
-    hit = world.castRayAndGetNormal(ray, 3, true, null, null, null, tankRigidBody);
-
     if (!playerDead && !enemyDead && Math.abs(currentSpeed) > 1) {
       const fwdDir = currentSpeed > 0 ? forward : forward.clone().negate();
       const fwdRay = new RAPIER.Ray(
@@ -1798,8 +1809,24 @@ function animate() {
     playerKnockbackVel.y *= cannonKnockbackDecay;
     playerKnockbackVel.z *= cannonKnockbackDecay;
     // When airborne: preserve momentum, no drive/turn input (wheels not on ground)
-    const vx = hit ? forward.x * effectiveSpeed + playerKnockbackVel.x : linVel.x + playerKnockbackVel.x;
-    const vz = hit ? forward.z * effectiveSpeed + playerKnockbackVel.z : linVel.z + playerKnockbackVel.z;
+    let vx, vz;
+    if (hit) {
+      vx = forward.x * effectiveSpeed + playerKnockbackVel.x;
+      vz = forward.z * effectiveSpeed + playerKnockbackVel.z;
+    } else {
+      const forwardVel = linVel.x * forward.x + linVel.z * forward.z;
+      // Carryover: when leaving a ledge while holding forward, ensure we keep at least currentSpeed
+      // (helps slow tanks like Gerald who otherwise stop abruptly at the edge)
+      if (targetSpeed > 0 && forwardVel < currentSpeed && currentSpeed > 0.5) {
+        const lateralX = linVel.x - forward.x * forwardVel;
+        const lateralZ = linVel.z - forward.z * forwardVel;
+        vx = forward.x * currentSpeed + lateralX + playerKnockbackVel.x;
+        vz = forward.z * currentSpeed + lateralZ + playerKnockbackVel.z;
+      } else {
+        vx = linVel.x + playerKnockbackVel.x;
+        vz = linVel.z + playerKnockbackVel.z;
+      }
+    }
     tankRigidBody.setLinvel(
       {
         x: vx,
@@ -1910,15 +1937,19 @@ function animate() {
         if (distToTarget < enemyWaypointReachDist && e.path.length > 1) {
           e.path.shift();
           e.pathTarget = e.path[0];
-          const toNext = new THREE.Vector3(e.pathTarget.x - ePos.x, 0, e.pathTarget.z - ePos.z);
-          distToTarget = toNext.length();
-          toTarget = toNext.normalize();
+          const toNew = new THREE.Vector3(e.pathTarget.x - ePos.x, 0, e.pathTarget.z - ePos.z);
+          distToTarget = toNew.length();
         } else if (distToTarget < enemyWaypointReachDist && e.path.length <= 1) {
           e.pathTarget = null;
           toTarget = toPlayer.clone();
           distToTarget = dist;
-        } else {
-          toTarget = toWaypoint.normalize();
+        }
+        // Steering target: look ahead for smoother curves (e.g. circular paths)
+        const lookAheadIdx = Math.min(currentLevelPathLookAhead, e.path.length - 1);
+        const steerTarget = e.path[lookAheadIdx] || e.pathTarget;
+        if (steerTarget) {
+          const toSteer = new THREE.Vector3(steerTarget.x - ePos.x, 0, steerTarget.z - ePos.z);
+          if (toSteer.lengthSq() > 0.0001) toTarget = toSteer.normalize();
         }
       }
     }

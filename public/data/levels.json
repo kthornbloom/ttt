@@ -38,7 +38,8 @@
       "order": 5,
       "difficulty": 3,
       "glbPath": "/assets/levels/level-05.glb",
-      "imagePath": "/assets/images/levels/level-05.png"
+      "imagePath": "/assets/images/levels/level-05.png",
+      "pathLookAhead": 1
     },
     {
       "id": "level-06",
@@ -46,7 +47,8 @@
       "order": 5,
       "difficulty": 3,
       "glbPath": "/assets/levels/level-06.glb",
-      "imagePath": "/assets/images/levels/level-06.png"
+      "imagePath": "/assets/images/levels/level-06.png",
+      "pathLookAhead": 4
     }
   ]
 }
