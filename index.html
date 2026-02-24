@@ -11,6 +11,12 @@
   <link href="https://fonts.googleapis.com/css2?family=Jersey+15&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; }
+    html, body, * {
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+      -webkit-touch-callout: none;
+    }
     body { margin: 0; overflow: hidden; font-family: "Jersey 15", sans-serif; }
     canvas { display: block; }
 
@@ -962,6 +968,7 @@
       padding: 0.4rem 0.6rem;
       border-radius: 0.5rem;
       font-family: "Jersey 15", sans-serif;
+      z-index: 10;
     }
     .volume-controls label {
       color: white;

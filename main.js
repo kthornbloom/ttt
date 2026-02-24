@@ -20,11 +20,14 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { HorizontalTiltShiftShader } from 'three/addons/shaders/HorizontalTiltShiftShader.js';
 import { VerticalTiltShiftShader } from 'three/addons/shaders/VerticalTiltShiftShader.js';
 import RAPIER from '@dimforge/rapier3d';
+import { Pathfinding } from 'three-pathfinding';
+import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 const masterGain = initMasterGain(audioCtx);
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────
 const showCollisionBox = false;
+const showNavmeshDebug = false;  // Set true to see navmesh in-game (semi-transparent green)
 
 const camHeight = 20;
 const camDist = 25;
@@ -83,17 +86,19 @@ const cannonKnockbackImpulse = 25;
 const cannonKnockbackDecay = .94;
 const laserDamagePerTick = 4;
 const laserDamageInterval = 0.1;
-const enemySpeed = 3;
+const enemySpeed = 6;
 const enemyTurnSpeed = 1;
 const enemyReverseSpeed = 2;
 const enemyShootRange = 50;
+const enemyStandoffDist = 12;  // Stop chasing and rotate to face when within this range
 const enemyShootCooldown = 10;
 const enemyAimThreshold = 0.92;
 const enemyStuckDist = 2;
 const enemyStuckTime = 0.8;
-const enemyLedgeDropThreshold = 1.2;
-const enemyLedgeCheckDist = 1.5;
-const turretLaserRange = 15;
+const enemyPathUpdateInterval = 0.25;
+const enemyWaypointReachDist = 2.5;
+const enemyMoveAlignThreshold = 0.6;   // Must face target before moving forward (allows quicker turn onto path around void)
+const turretLaserRange = 25;
 const turretLaserDuration = 0.5;
 const turretLaserCooldown = 6;
 const turretLaserDamagePerTick = 2;
@@ -368,6 +373,9 @@ let playerKnockbackVel = { x: 0, y: 0, z: 0 };
 let enemyKnockbackVel = { x: 0, y: 0, z: 0 };
 let healthPickups = [];
 let ammoPickups = [];
+let pathfinding = null;
+let pathfindingZoneId = null;
+let lastPathLogTime = 0;
 const impactFlashDuration = 0.7;
 const healthPickupRadius = 2.5;
 const ammoPickupRadius = 2.5;
@@ -496,7 +504,7 @@ function stopHeatBeamSound() {
 function updateEngineSound() {
   if (!engineBuffer) return;
 
-  const absSpeed = Math.abs(currentSpeed);
+  const absSpeed = enemyDead ? 0 : Math.abs(currentSpeed);
   const normalized = Math.min(absSpeed / playerMaxSpeed, 1);
 
   if (!engineSource && normalized > 0) {
@@ -592,7 +600,8 @@ function createEnemyTank(tankTemplate, spawnPos = { x: 15, y: 2, z: 15 }, spawnR
   return {
     mesh: enemy, body, barrel, wFL, wFR, wBL, wBR, rigidBody: rb, collider: col,
     health: enemyHealthMax, cannonCooldown: 0, engineTime: 0, stuckTimer: 0, hitJolt: 0,
-    lastPos: { x: pos.x, y: pos.y ?? 2, z: pos.z }, knockbackVel: { x: 0, y: 0, z: 0 }, hitFlashUntil: 0
+    lastPos: { x: pos.x, y: pos.y ?? 2, z: pos.z }, knockbackVel: { x: 0, y: 0, z: 0 }, hitFlashUntil: 0,
+    pathTarget: null, path: [], pathUpdateTime: 0
   };
 }
 
@@ -606,6 +615,7 @@ function createTurret(turretTemplate, spawnPos = { x: 10, y: 0, z: 10 }, spawnRo
   });
   const base = turret.getObjectByName('Base');
   const head = turret.getObjectByName('Head');
+  const laserOrigin = turret.getObjectByName('LaserOrigin') || turret.getObjectByName('Muzzle');
   const pos = spawnPos instanceof THREE.Vector3 ? spawnPos : { x: spawnPos.x, y: spawnPos.y ?? 0, z: spawnPos.z };
   turret.position.set(pos.x, pos.y, pos.z);
   if (spawnRot && (spawnRot instanceof THREE.Quaternion || spawnRot.w !== undefined)) {
@@ -632,7 +642,7 @@ function createTurret(turretTemplate, spawnPos = { x: 10, y: 0, z: 10 }, spawnRo
   scene.add(laserLine);
   scene.add(turret);
   return {
-    mesh: turret, base, head, rigidBody: rb, collider, laserLine,
+    mesh: turret, base, head, laserOrigin, rigidBody: rb, collider, laserLine,
     health: enemyHealthMax, laserCooldown: 0, laserShootingUntil: 0, hitFlashUntil: 0
   };
 }
@@ -836,8 +846,29 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   const playerRot = spawns.player?.rotation ?? new THREE.Quaternion();
   const enemySpawns = spawns.enemyTank;
 
+  const navmeshGeometries = [];
   level.traverse((c) => {
     if (c.isMesh && !c.name.startsWith('Spawn_')) {
+      const isNavmesh = c.name && c.name.toLowerCase().includes('navmesh');
+      if (isNavmesh) {
+        navmeshGeometries.push(c.geometry.clone().applyMatrix4(c.matrixWorld));
+        if (showNavmeshDebug) {
+          c.visible = true;
+          c.material = new THREE.MeshBasicMaterial({
+            color: 0x00ff00,
+            transparent: true,
+            opacity: 0.35,
+            wireframe: false,
+            side: THREE.DoubleSide
+          });
+          c.castShadow = c.receiveShadow = false;
+          console.log('[Navmesh] Found mesh:', c.name, '– visible for debug');
+        } else {
+          c.visible = false;
+          c.castShadow = c.receiveShadow = false;
+        }
+        return;
+      }
       c.castShadow = c.receiveShadow = true;
       // Fix transparent materials: depthWrite causes flickering when semi-transparent
       // surfaces overlap or interact with fog. Shadows render separately so they stay visible.
@@ -859,6 +890,24 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
     }
   });
   scene.add(level);
+
+  pathfinding = null;
+  pathfindingZoneId = null;
+  if (navmeshGeometries.length > 0) {
+    const navmeshGeometry = navmeshGeometries.length === 1
+      ? navmeshGeometries[0]
+      : BufferGeometryUtils.mergeGeometries(navmeshGeometries);
+    pathfinding = new Pathfinding();
+    pathfindingZoneId = 'level';
+    pathfinding.setZoneData(pathfindingZoneId, Pathfinding.createZone(navmeshGeometry));
+    const zone = pathfinding.zones[pathfindingZoneId];
+    const groupCount = zone?.groups?.length ?? 0;
+    console.log('[Navmesh] Pathfinding enabled –', navmeshGeometries.length, 'mesh(es),', groupCount, 'group(s). Enemies will path around obstacles.');
+  } else {
+    const meshNames = [];
+    level.traverse((c) => { if (c.isMesh && c.name) meshNames.push(c.name); });
+    console.log('[Navmesh] No navmesh found. Name must include "navmesh". Meshes in level:', meshNames.join(', ') || '(none)');
+  }
 
   // Load Tank (player)
   const playerTankPath = await getCharacterGlbPath(tankId);
@@ -1377,9 +1426,9 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
       keys['Space'] = true;
       const w1 = getWeapon(1);
       const w2 = getWeapon(2);
-      const canFireProjectile = !playerDead && weaponMode === 1 && w1 && isProjectileWeapon(w1) && cannonAmmo > 0 && cannonCooldown <= 0;
-      const canFireMortar = !playerDead && weaponMode === 2 && w2?.type === 'mortar' && cannonAmmo > 0 && weapon2Cooldown <= 0;
-      const canFireEMP = !playerDead && weaponMode === 2 && w2?.type === 'emp' && weapon2Cooldown <= 0;
+      const canFireProjectile = !playerDead && !enemyDead && weaponMode === 1 && w1 && isProjectileWeapon(w1) && cannonAmmo > 0 && cannonCooldown <= 0;
+      const canFireMortar = !playerDead && !enemyDead && weaponMode === 2 && w2?.type === 'mortar' && cannonAmmo > 0 && weapon2Cooldown <= 0;
+      const canFireEMP = !playerDead && !enemyDead && weaponMode === 2 && w2?.type === 'emp' && weapon2Cooldown <= 0;
       if (canFireProjectile || canFireMortar || canFireEMP) barrelRecoil = 1;
       if (canFireProjectile) fireCannonPending = true;
       if (canFireMortar) fireMortarPending = true;
@@ -1469,11 +1518,11 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
       e.preventDefault();
       const w1 = getWeapon(1);
       const w2 = getWeapon(2);
-      const canFireProjectile = !playerDead && weaponMode === 1 && w1 && isProjectileWeapon(w1) && cannonAmmo > 0 && cannonCooldown <= 0 && !e.repeat;
-      const canFireMortar = !playerDead && weaponMode === 2 && w2?.type === 'mortar' && cannonAmmo > 0 && weapon2Cooldown <= 0 && !e.repeat;
-      const canFireEMP = !playerDead && weaponMode === 2 && w2?.type === 'emp' && weapon2Cooldown <= 0 && !e.repeat;
+      const canFireProjectile = !playerDead && !enemyDead && weaponMode === 1 && w1 && isProjectileWeapon(w1) && cannonAmmo > 0 && cannonCooldown <= 0 && !e.repeat;
+      const canFireMortar = !playerDead && !enemyDead && weaponMode === 2 && w2?.type === 'mortar' && cannonAmmo > 0 && weapon2Cooldown <= 0 && !e.repeat;
+      const canFireEMP = !playerDead && !enemyDead && weaponMode === 2 && w2?.type === 'emp' && weapon2Cooldown <= 0 && !e.repeat;
       const hbW = getWeapon(weaponMode);
-      const canFireHeatBeam = !playerDead && (weaponMode === 1 || weaponMode === 2) && isHeatBeamWeapon(hbW) &&
+      const canFireHeatBeam = !playerDead && !enemyDead && (weaponMode === 1 || weaponMode === 2) && isHeatBeamWeapon(hbW) &&
         (hbW?.type === 'minigun' ? minigunAmmo > 0 : mgHeat < (hbW?.heatMax ?? 1) && !mgOverheated);
       if (canFireProjectile || canFireMortar || canFireEMP) barrelRecoil = 1;
       if (canFireProjectile) fireCannonPending = true;
@@ -1515,11 +1564,11 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
       keys[fireKey] = true;
       const w1 = getWeapon(1);
       const w2 = getWeapon(2);
-      const canFireProjectile = !playerDead && weaponMode === 1 && w1 && isProjectileWeapon(w1) && cannonAmmo > 0 && cannonCooldown <= 0;
-      const canFireMortar = !playerDead && weaponMode === 2 && w2?.type === 'mortar' && cannonAmmo > 0 && weapon2Cooldown <= 0;
-      const canFireEMP = !playerDead && weaponMode === 2 && w2?.type === 'emp' && weapon2Cooldown <= 0;
+      const canFireProjectile = !playerDead && !enemyDead && weaponMode === 1 && w1 && isProjectileWeapon(w1) && cannonAmmo > 0 && cannonCooldown <= 0;
+      const canFireMortar = !playerDead && !enemyDead && weaponMode === 2 && w2?.type === 'mortar' && cannonAmmo > 0 && weapon2Cooldown <= 0;
+      const canFireEMP = !playerDead && !enemyDead && weaponMode === 2 && w2?.type === 'emp' && weapon2Cooldown <= 0;
       const hbW = getWeapon(weaponMode);
-      const canFireHeatBeam = !playerDead && (weaponMode === 1 || weaponMode === 2) && isHeatBeamWeapon(hbW) &&
+      const canFireHeatBeam = !playerDead && !enemyDead && (weaponMode === 1 || weaponMode === 2) && isHeatBeamWeapon(hbW) &&
         (hbW?.type === 'minigun' ? minigunAmmo > 0 : mgHeat < (hbW?.heatMax ?? 1) && !mgOverheated);
       if (canFireProjectile || canFireMortar || canFireEMP) barrelRecoil = 1;
       if (canFireProjectile) fireCannonPending = true;
@@ -1587,7 +1636,7 @@ function animate() {
   // Mobile: joystick rotates tank, drive zone (drag up/down) controls speed. Desktop: keys.
   const joystickActive = isTouchMode() && (touchJoystickInput.dx !== 0 || touchJoystickInput.dy !== 0);
   const driveActive = isTouchMode() && touchDriveInput.value !== 0;
-  const targetSpeed = (!playerDead && tankRigidBody && (
+  const targetSpeed = (!playerDead && !enemyDead && tankRigidBody && (
     driveActive ? touchDriveInput.value * playerMaxSpeed
     : isKeyForAction(keys, 'forward') ? playerMaxSpeed
     : isKeyForAction(keys, 'backward') ? -playerMaxSpeed
@@ -1599,7 +1648,7 @@ function animate() {
     const dy = touchJoystickInput.dy;
     const mag = Math.sqrt(dx * dx + dy * dy);
     const desiredDir = mag > 0.001 ? new THREE.Vector3(-dx, 0, -dy).normalize() : null;
-    if (desiredDir && tankRigidBody && !playerDead) {
+    if (desiredDir && tankRigidBody && !playerDead && !enemyDead) {
       const rot = tankRigidBody.rotation();
       const q = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
       const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
@@ -1613,7 +1662,7 @@ function animate() {
     targetTurn = (!playerDead && tankRigidBody && (isKeyForAction(keys, 'turnLeft') ? maxTurnSpeed : isKeyForAction(keys, 'turnRight') ? -maxTurnSpeed : 0)) || 0;
   }
 
-  const isBoosting = !playerDead && isKeyForAction(keys, 'boost') && boostRemaining > 0 && boostCooldown <= 0;
+  const isBoosting = !playerDead && !enemyDead && isKeyForAction(keys, 'boost') && boostRemaining > 0 && boostCooldown <= 0;
   if (isBoosting) {
     boostRemaining = Math.max(0, boostRemaining - dt);
     if (boostRemaining <= 0) boostCooldown = boostCooldownTime;
@@ -1623,13 +1672,13 @@ function animate() {
   }
 
   const speedMult = isBoosting ? boostMultiplier : 1;
-  const speedRate = targetSpeed !== 0 ? playerAccelRate : decelRateForward;
-  const turnRate = targetTurn !== 0 ? playerAccelRate : decelRateTurn;
+  const speedRate = targetSpeed !== 0 ? playerAccelRate : (enemyDead ? 8 : decelRateForward);
+  const turnRate = targetTurn !== 0 ? playerAccelRate : (enemyDead ? 8 : decelRateTurn);
 
   currentSpeed += (targetSpeed * speedMult - currentSpeed) * Math.min(1, speedRate * dt);
   currentTurnSpeed += (targetTurn - currentTurnSpeed) * Math.min(1, turnRate * dt);
 
-  if (!playerDead && tankRigidBody) {
+  if (!playerDead && !enemyDead && tankRigidBody) {
     if (isKeyForAction(keys, 'resetAim')) {
       bodyAimPitch = 0;
     } else {
@@ -1653,7 +1702,7 @@ function animate() {
     );
     hit = world.castRayAndGetNormal(ray, 3, true, null, null, null, tankRigidBody);
 
-    if (!playerDead && Math.abs(currentSpeed) > 1) {
+    if (!playerDead && !enemyDead && Math.abs(currentSpeed) > 1) {
       const fwdDir = currentSpeed > 0 ? forward : forward.clone().negate();
       const fwdRay = new RAPIER.Ray(
         { x: pos.x + fwdDir.x * 0.5, y: pos.y, z: pos.z + fwdDir.z * 0.5 },
@@ -1733,7 +1782,76 @@ function animate() {
     const eForward = eForwardFull.clone();
     eForward.y = 0;
     eForward.normalize();
-    const cross = new THREE.Vector3().crossVectors(eForward, toPlayer);
+
+    let toTarget = toPlayer.clone();
+    let distToTarget = dist;
+    if (pathfinding && pathfindingZoneId && tankRigidBody && !playerDead && !enemyDisabled) {
+      const ePosV3 = new THREE.Vector3(ePos.x, ePos.y, ePos.z);
+      const pPosV3 = new THREE.Vector3(pPos.x, pPos.y, pPos.z);
+      if (now - e.pathUpdateTime > enemyPathUpdateInterval) {
+        let pathErr = null;
+        try {
+          const groupID = pathfinding.getGroup(pathfindingZoneId, ePosV3);
+          if (groupID == null) throw new Error('Enemy not on navmesh');
+          let path = pathfinding.findPath(ePosV3, pPosV3, pathfindingZoneId, groupID);
+          if ((!path || path.length === 0)) {
+            const enemyNode = pathfinding.getClosestNode(ePosV3, pathfindingZoneId, groupID, false);
+            const targetNode = pathfinding.getClosestNode(pPosV3, pathfindingZoneId, groupID, false);
+            if (enemyNode && targetNode) {
+              path = pathfinding.findPath(enemyNode.centroid.clone(), targetNode.centroid.clone(), pathfindingZoneId, groupID);
+            }
+            if ((!path || path.length === 0) && enemyNode && targetNode) {
+              const startOnMesh = new THREE.Vector3(ePos.x, enemyNode.centroid.y, ePos.z);
+              const targetOnMesh = new THREE.Vector3(pPos.x, targetNode.centroid.y, pPos.z);
+              path = pathfinding.findPath(startOnMesh, targetOnMesh, pathfindingZoneId, groupID);
+            }
+          }
+          if (path && path.length > 0) {
+            e.path = path;
+            e.pathTarget = path[0];
+            e._lastPathErr = null;
+          } else {
+            // Keep last path – don't clear. Intermittent failures won't stop the enemy.
+          }
+          e.pathUpdateTime = now;
+        } catch (err) {
+          pathErr = err;
+          e.path = [];
+          e.pathTarget = null;
+          e._lastPathErr = err?.message || String(err);
+        }
+        if (now - lastPathLogTime > 2 && e === enemies.find((x) => x.rigidBody && x.health > 0)) {
+          lastPathLogTime = now;
+          if (e.path.length > 0) {
+            console.log(`[Navmesh] Enemy using pathfinding – ${e.path.length} waypoint(s) to player`);
+          } else if (pathErr) {
+            console.warn('[Navmesh] Pathfinding error:', e._lastPathErr);
+          }
+        }
+      }
+      if (e.pathTarget) {
+        const toWaypoint = new THREE.Vector3(e.pathTarget.x - ePos.x, 0, e.pathTarget.z - ePos.z);
+        distToTarget = toWaypoint.length();
+        if (distToTarget < enemyWaypointReachDist && e.path.length > 1) {
+          e.path.shift();
+          e.pathTarget = e.path[0];
+          const toNext = new THREE.Vector3(e.pathTarget.x - ePos.x, 0, e.pathTarget.z - ePos.z);
+          distToTarget = toNext.length();
+          toTarget = toNext.normalize();
+        } else if (distToTarget < enemyWaypointReachDist && e.path.length <= 1) {
+          e.pathTarget = null;
+          toTarget = toPlayer.clone();
+          distToTarget = dist;
+        } else {
+          toTarget = toWaypoint.normalize();
+        }
+      }
+    }
+
+    const inStandoffRange = dist < enemyStandoffDist;
+    const turnToward = inStandoffRange ? toPlayer : toTarget;
+    const cross = new THREE.Vector3().crossVectors(eForward, turnToward);
+    const dotToTarget = eForward.dot(toTarget);
     const dotToPlayer = eForward.dot(toPlayer);
 
     const forwardRay = new RAPIER.Ray(
@@ -1748,28 +1866,20 @@ function animate() {
     );
     e.lastPos = { x: ePos.x, y: ePos.y, z: ePos.z };
 
-    let eTargetSpeed = enemyDisabled ? 0 : (dist > 8 ? enemySpeed : 0);
+    const usePathfinding = pathfinding && e.pathTarget;
+    const pathFailed = pathfinding && !e.pathTarget && tankRigidBody;
+    const moveThreshold = usePathfinding ? 2 : 8;
+    const wantsToMove = distToTarget > moveThreshold && !inStandoffRange;
+    const facingTarget = dotToTarget >= enemyMoveAlignThreshold;
+    let eTargetSpeed = enemyDisabled || pathFailed || inStandoffRange ? 0 : (wantsToMove && facingTarget ? enemySpeed : 0);
     let eTargetTurn = enemyDisabled ? 0 : (cross.y > 0.1 ? enemyTurnSpeed : cross.y < -0.1 ? -enemyTurnSpeed : 0);
 
-    // Ledge detection: when moving forward, check if ground drops ahead (don't drive off edges)
-    let ledgeAhead = false;
-    if (eTargetSpeed > 0 && !enemyDisabled) {
-      const ledgeOrigin = { x: ePos.x + eForward.x * enemyLedgeCheckDist, y: ePos.y + 0.5, z: ePos.z + eForward.z * enemyLedgeCheckDist };
-      const ledgeRay = new RAPIER.Ray(ledgeOrigin, { x: 0, y: -1, z: 0 });
-      const ledgeHit = world.castRayAndGetNormal(ledgeRay, 6, true, null, null, null, e.rigidBody);
-      if (!ledgeHit) {
-        ledgeAhead = true;
-      } else {
-        const groundY = ledgeOrigin.y - ledgeHit.toi;
-        if (ePos.y - groundY > enemyLedgeDropThreshold) ledgeAhead = true;
-      }
-    }
-
-    if (wallHit || ledgeAhead || (!hitPlayer && distMoved < 0.02 && eTargetSpeed > 0)) {
+    if (wallHit || (!hitPlayer && distMoved < 0.02 && eTargetSpeed > 0)) {
       e.stuckTimer += dt;
       if (e.stuckTimer > enemyStuckTime * 0.3) {
         eTargetSpeed = -enemyReverseSpeed;
-        eTargetTurn = cross.y > 0 ? enemyTurnSpeed : -enemyTurnSpeed;
+        const stuckTurnSpeed = usePathfinding ? enemyTurnSpeed * 2.5 : enemyTurnSpeed;
+        eTargetTurn = cross.y > 0 ? stuckTurnSpeed : -stuckTurnSpeed;
       }
     } else {
       e.stuckTimer = Math.max(0, e.stuckTimer - dt * 2);
@@ -1850,12 +1960,11 @@ function animate() {
       const baseOrMesh = t.base || t.mesh;
       const invQuat = baseOrMesh.getWorldQuaternion(new THREE.Quaternion()).invert();
       const toPlayerLocal = toPlayer.clone().applyQuaternion(invQuat);
-      const targetAngle = Math.atan2(toPlayerLocal.x, -toPlayerLocal.z);
-      const turnSpeed = 6 * dt;
+      const targetAngle = -Math.atan2(toPlayerLocal.x, -toPlayerLocal.z);
       let angleDiff = targetAngle - t.head.rotation.y;
       while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
       while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
-      t.head.rotation.y += Math.sign(angleDiff) * Math.min(Math.abs(angleDiff), turnSpeed);
+      t.head.rotation.y += angleDiff * Math.min(1, 8 * dt);
     }
     t.laserCooldown = Math.max(0, t.laserCooldown - dt);
     t.laserShootingUntil = Math.max(0, t.laserShootingUntil - dt);
@@ -1873,9 +1982,15 @@ function animate() {
       }
     }
     const isShooting = t.laserShootingUntil > 0;
-    if (isShooting && t.head && t.laserLine) {
-      const headTip = new THREE.Vector3(0, 0, 0.5).applyMatrix4(t.head.matrixWorld);
-      const headForward = new THREE.Vector3(0, 0, 1).applyQuaternion(t.head.getWorldQuaternion(new THREE.Quaternion()));
+    if (isShooting && (t.head || t.laserOrigin) && t.laserLine) {
+      let headTip, headForward;
+      if (t.laserOrigin) {
+        headTip = t.laserOrigin.getWorldPosition(new THREE.Vector3());
+        headForward = t.laserOrigin.getWorldDirection(new THREE.Vector3());
+      } else {
+        headTip = new THREE.Vector3(0, 0, 0.5).applyMatrix4(t.head.matrixWorld);
+        headForward = new THREE.Vector3(0, 0, 1).applyQuaternion(t.head.getWorldQuaternion(new THREE.Quaternion()));
+      }
       const ray = new RAPIER.Ray(
         { x: headTip.x, y: headTip.y, z: headTip.z },
         { x: headForward.x, y: headForward.y, z: headForward.z }
@@ -2134,11 +2249,12 @@ function animate() {
     }
   }
   if (bodyGroup && tankMesh) {
-    engineTime += dt * 370;
-    bodyGroup.position.y = (bodyDefaultY ?? 0) + 0.05 * Math.sin(engineTime);
+    if (!enemyDead) engineTime += dt * 370;
+    const bounce = enemyDead ? 0 : 0.05 * Math.sin(engineTime);
+    bodyGroup.position.y = (bodyDefaultY ?? 0) + bounce;
 
-    const targetRoll = -currentTurnSpeed / maxTurnSpeed * bodyRollMax;
-    const targetPitch = -currentSpeed / playerMaxSpeed * bodyPitchMax;
+    const targetRoll = enemyDead ? 0 : -currentTurnSpeed / maxTurnSpeed * bodyRollMax;
+    const targetPitch = enemyDead ? 0 : -currentSpeed / playerMaxSpeed * bodyPitchMax;
     bodyRoll += (targetRoll - bodyRoll) * bodySuspensionSoftness;
     bodyPitch += (targetPitch - bodyPitch) * bodySuspensionSoftness;
     bodyGroup.rotation.set(bodyPitch + bodyAimPitch, 0, bodyRoll);
@@ -2206,7 +2322,10 @@ function animate() {
       if (t >= 1) {
         if (to) {
           to.scale.set(1, 1, 1);
-          if (!isTopMountedWeapon(weaponSwitchToType) && def?.z !== undefined) to.position.z = def.z;
+          if (!isTopMountedWeapon(weaponSwitchToType) && def?.z !== undefined) {
+            to.position.z = def.z;
+            barrelDefaultZ = def.z;  // recoil uses this; must match extended position
+          }
           if (isTopMountedWeapon(weaponSwitchToType)) to.position.y = getTopMountedExtendedY(to);
         }
         weaponMode = weaponSwitchTargetMode;
@@ -2219,7 +2338,7 @@ function animate() {
   const isMinigunWeapon = heatBeamW?.type === 'minigun';
   const heatBeamActive = heatBeamW && isHeatBeamWeapon(heatBeamW) && isKeyForAction(keys, 'fire') &&
     (isMinigunWeapon ? minigunAmmo > 0 : mgHeat < (heatBeamW.heatMax ?? 1) && !mgOverheated);
-  if (barrelGroup && !playerDead && tankMesh && weaponSwitchPhase === 'idle') {
+  if (barrelGroup && !playerDead && !enemyDead && tankMesh && weaponSwitchPhase === 'idle') {
     if (!heatBeamActive) {
       barrelRecoil = Math.max(0, barrelRecoil - recoilSpeed * dt);
       const currentW = getWeapon(weaponMode);
@@ -2260,7 +2379,7 @@ function animate() {
   const cannonW = w1?.type === 'cannon' ? w1 : null;
   const mortarW = (weaponMode === 2 ? w2 : w1)?.type === 'mortar' ? (weaponMode === 2 ? w2 : w1) : null;
 
-  if (!playerDead && tankRigidBody && fireCannonPending && cannonW && cannonAmmo > 0 && cannonCooldown <= 0) {
+  if (!playerDead && !enemyDead && tankRigidBody && fireCannonPending && cannonW && cannonAmmo > 0 && cannonCooldown <= 0) {
     fireCannonPending = false;
     cannonAmmo--;
     cannonCooldown = cannonW.cooldown ?? cannonCooldownTime;
@@ -2286,7 +2405,7 @@ function animate() {
     muzzleLight.intensity = 20;
   }
 
-  if (!playerDead && tankRigidBody && fireMortarPending && mortarW && cannonAmmo > 0 && weapon2Cooldown <= 0) {
+  if (!playerDead && !enemyDead && tankRigidBody && fireMortarPending && mortarW && cannonAmmo > 0 && weapon2Cooldown <= 0) {
     fireMortarPending = false;
     cannonAmmo--;
     weapon2Cooldown = mortarW.cooldown ?? 5;
@@ -2325,7 +2444,7 @@ function animate() {
     muzzleLight.intensity = 20;
   }
 
-  if (!playerDead && tankRigidBody && fireEMPPending && w2?.type === 'emp' && weapon2Cooldown <= 0) {
+  if (!playerDead && !enemyDead && tankRigidBody && fireEMPPending && w2?.type === 'emp' && weapon2Cooldown <= 0) {
     fireEMPPending = false;
     weapon2Cooldown = w2.cooldown ?? 20;
     const range = w2.range ?? 15;
@@ -2370,7 +2489,7 @@ function animate() {
     muzzleLight.intensity = Math.max(0, muzzleLight.intensity - 120 * dt);
   }
 
-  if (!playerDead && tankRigidBody && barrelGroup && tankMesh) {
+  if (!playerDead && !enemyDead && tankRigidBody && barrelGroup && tankMesh) {
     const fd = fireForward.clone().normalize();
     const trajW = getWeapon(weaponMode);
     const showProjectileTrajectory = trajW && isProjectileWeapon(trajW);
@@ -2670,7 +2789,7 @@ function animate() {
     return true;
   });
 
-  const wantsToFireHeatBeam = !playerDead && heatBeamW && isHeatBeamWeapon(heatBeamW) && isKeyForAction(keys, 'fire');
+  const wantsToFireHeatBeam = !playerDead && !enemyDead && heatBeamW && isHeatBeamWeapon(heatBeamW) && isKeyForAction(keys, 'fire');
   const beamHeatMax = heatBeamW?.heatMax ?? mgHeatMax;
   const beamHeatRate = heatBeamW?.heatRate ?? mgHeatRate;
   const beamCoolRate = heatBeamW?.coolRate ?? mgCoolRate;
@@ -2852,7 +2971,7 @@ function animate() {
   }
 
   if (tankRigidBody) lastCamTarget = tankRigidBody.translation();
-  else if (enemies.length > 0 || turrets.length > 0) {
+  else if (!playerDead && (enemies.length > 0 || turrets.length > 0)) {
     const aliveEnemy = enemies.find((e) => e.rigidBody && e.health > 0);
     const aliveTurret = turrets.find((t) => t.rigidBody && t.health > 0);
     const alive = aliveEnemy || aliveTurret;

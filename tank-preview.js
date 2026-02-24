@@ -203,6 +203,11 @@ async function loadTank(character) {
 
   previewWeaponIndex = 0;
   weaponSwitchPhase = 'idle';
+  weaponSwitchTargetIndex = 0;
+  weaponSwitchFromBarrel = null;
+  weaponSwitchToBarrel = null;
+  weaponSwitchFromType = null;
+  weaponSwitchToType = null;
   previewCharacter = character;
   const primaryWeapon = character?.weapons?.[0];
   const primaryType = primaryWeapon?.type;
