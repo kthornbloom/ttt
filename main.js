@@ -2133,6 +2133,10 @@ function animate() {
     else stopBoostSound();
   } else {
     stopBoostSound();
+    if (engineSource) {
+      try { engineSource.stop(); } catch (_) {}
+      engineSource = null;
+    }
   }
 
   const anyEnemyAlive = enemies.some((e) => e.rigidBody && e.health > 0);
