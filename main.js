@@ -42,7 +42,10 @@ const decelRateTurn = 5;
 const boostDuration = 2;
 const boostRefillDelay = 3;  // Wait 3 seconds after boost ends before refilling
 const boostRefillRate = 0.7;  // Seconds of boost restored per second
-const boostMultiplier = 1.8;
+const boostForceAir = 10;   // Rocket thrust when airborne (avoids flying)
+const boostForceGround = 400;  // Higher when grounded to overcome friction
+const boostRampUpSpeed = 10;   // How fast boost ramps up when pressed
+const boostRampDownSpeed = 4;  // How fast boost ramps down when released
 
 const wheelSpeed = 4;
 const turnWheelFactor = 0.6;
@@ -336,6 +339,7 @@ let currentSpeed = 0, currentTurnSpeed = 0;
 let boostRemaining = boostDuration;
 let boostRefillDelayRemaining = 0;
 let lastFrameWantedBoostButEmpty = false;
+let boostRamp = 0;  // 0–1, ramps up/down for smooth boost cutoff
 let weaponMode = 1;
 let weaponSwitchPhase = 'idle';
 let weaponSwitchT = 0;
@@ -424,8 +428,12 @@ let minigunBuffer = null;
 let shootBuffer = null;
 let reloadBuffer = null;
 let heatBeamSource = null;
+let boostSource = null;
+let boostBuffer = null;
 let explodeBuffer = null;
 let repairBuffer = null;
+let ammoCollectedBuffer = null;
+let healthRestoredBuffer = null;
 let squirtBuffer = null;
 let thudBuffer = null;
 let winSpeechBuffers = [];
@@ -487,16 +495,22 @@ async function loadGameSounds() {
     loadAudio(asset('/assets/audio/explode.mp3')),
     loadAudio(asset('/assets/audio/repair.mp3')),
     loadAudio(asset('/assets/audio/squirt.mp3')),
+    loadAudio(asset('/assets/audio/boost.mp3')),
     loadAudio(asset('/assets/audio/thud.mp3')),
+    loadAudio(asset('/assets/audio/speech/ammo-collected.mp3')),
+    loadAudio(asset('/assets/audio/speech/health-restored.mp3')),
     ...winFiles.map((f) => loadAudio(asset(`/assets/audio/speech/win/${f}`))),
     ...lossFiles.map((f) => loadAudio(asset(`/assets/audio/speech/loss/${f}`)))
   ]);
   explodeBuffer = results[0];
   repairBuffer = results[1];
   squirtBuffer = results[2];
-  thudBuffer = results[3];
-  winSpeechBuffers = results.slice(4, 7);
-  lossSpeechBuffers = results.slice(7, 10);
+  boostBuffer = results[3];
+  thudBuffer = results[4];
+  ammoCollectedBuffer = results[5];
+  healthRestoredBuffer = results[6];
+  winSpeechBuffers = results.slice(7, 10);
+  lossSpeechBuffers = results.slice(10, 13);
 }
 
 function playOnce(buffer) {
@@ -529,7 +543,23 @@ function stopHeatBeamSound() {
   }
 }
 
-function updateEngineSound(isBoosting = false) {
+function startBoostSound() {
+  if (!boostBuffer || boostSource) return;
+  boostSource = audioCtx.createBufferSource();
+  boostSource.buffer = boostBuffer;
+  boostSource.loop = true;
+  boostSource.connect(masterGain);
+  boostSource.start(0);
+}
+
+function stopBoostSound() {
+  if (boostSource) {
+    try { boostSource.stop(); } catch (_) {}
+    boostSource = null;
+  }
+}
+
+function updateEngineSound() {
   if (!engineBuffer) return;
 
   const absSpeed = (enemyDead && !exitHatch) ? 0 : Math.abs(currentSpeed);
@@ -548,10 +578,8 @@ function updateEngineSound(isBoosting = false) {
   }
 
   if (engineSource) {
-    // Pitch: Idle ~0.8x (deep rumble) to 2x rev; boost adds significant pitch-up
-    let pitch = 0.8 + normalized * 1.2;
-    if (isBoosting) pitch *= 1.6;  // Pitch up engine sound a lot during boost
-    engineSource.playbackRate.value = pitch;
+    // Pitch: Idle ~0.8x (deep rumble) to 2x rev
+    engineSource.playbackRate.value = 0.8 + normalized * 1.2;
     // Volume: Quiet idle, loud at speed
     engineGain.gain.value = 0.08 + normalized * 0.25;
   }
@@ -831,6 +859,7 @@ function stopGame() {
     engineSource = null;
   }
   stopHeatBeamSound();
+  stopBoostSound();
 }
 
 /** Unload and dispose the 3D scene, then return to character selection. */
@@ -993,6 +1022,7 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   barrelRecoil = 0;
   boostRemaining = boostDuration;
   boostRefillDelayRemaining = 0;
+  boostRamp = 0;
   weaponMode = 1;
   weaponSwitchPhase = 'idle';
   weaponSwitchT = 0;
@@ -2018,7 +2048,13 @@ function animate() {
   // Only reset when they release boost key; prevents squirt replay during micro-boost refill/drain cycle
   lastFrameWantedBoostButEmpty = wantsBoost ? (boostRemaining <= 0 || lastFrameWantedBoostButEmpty) : false;
 
-  if (tankRigidBody) updateEngineSound(isBoosting);
+  if (tankRigidBody) {
+    updateEngineSound();
+    if (isBoosting) startBoostSound();
+    else stopBoostSound();
+  } else {
+    stopBoostSound();
+  }
 
   const anyEnemyAlive = enemies.some((e) => e.rigidBody && e.health > 0);
   const anyTurretAlive = turrets.some((t) => t.rigidBody && t.health > 0);
@@ -2076,14 +2112,13 @@ function animate() {
     targetTurn = (canDrive && tankRigidBody && (isKeyForAction(keys, 'turnLeft') ? maxTurnSpeed : isKeyForAction(keys, 'turnRight') ? -maxTurnSpeed : 0)) || 0;
   }
 
-  const speedMult = isBoosting ? boostMultiplier : 1;
   const movementLocked = enemyDead && !exitHatch;
   const speedRate = targetSpeed !== 0 ? playerAccelRate : (movementLocked ? 8 : decelRateForward);
   const turnRate = targetTurn !== 0 ? playerAccelRate : (movementLocked ? 8 : decelRateTurn);
 
   // Only update drive state when grounded; when airborne, freeze so holding Back doesn't "charge" reverse
   if (hit) {
-    currentSpeed += (targetSpeed * speedMult - currentSpeed) * Math.min(1, speedRate * dt);
+    currentSpeed += (targetSpeed - currentSpeed) * Math.min(1, speedRate * dt);
     currentTurnSpeed += (targetTurn - currentTurnSpeed) * Math.min(1, turnRate * dt);
   }
 
@@ -2144,6 +2179,16 @@ function animate() {
         vz = linVel.z + playerKnockbackVel.z;
       }
     }
+    // Rocket boost: ramp up when pressed, ramp down when released (smooth cutoff)
+    boostRamp += (isBoosting ? 1 : -1) * (isBoosting ? boostRampUpSpeed : boostRampDownSpeed) * dt;
+    boostRamp = Math.max(0, Math.min(1, boostRamp));
+    if (boostRamp > 0.01) {
+      const force = hit ? boostForceGround : boostForceAir;
+      vx += forward.x * force * boostRamp * dt;
+      vz += forward.z * force * boostRamp * dt;
+    }
+    const tankCol = tankRigidBody.numColliders() > 0 ? tankRigidBody.collider(0) : null;
+    if (tankCol?.setFriction) tankCol.setFriction(boostRamp > 0.01 ? 0 : 1.2);
     tankRigidBody.setLinvel(
       {
         x: vx,
@@ -2583,7 +2628,7 @@ function animate() {
         p.collected = true;
         scene.remove(p.mesh);
         playerHealth = Math.min(playerHealthMaxDynamic, playerHealth + playerHealthMaxDynamic * healthPickupAmount);
-        playOnce(repairBuffer);
+        playOnce(healthRestoredBuffer);
       }
     }
     // Ammo pickup collection (refills to max)
@@ -2603,7 +2648,7 @@ function animate() {
         else if (w2?.type === 'minigun') minigunAmmo = w2.ammoMax ?? 150;
         else if (w2?.type === 'cannon' || w2?.type === 'mortar') cannonAmmo = w2.ammoMax ?? cannonAmmoMax;
         else cannonAmmo = cannonAmmoMax;
-        playOnce(repairBuffer);
+        playOnce(ammoCollectedBuffer);
       }
     }
     // Exit garage: drive into it when open; close door (reverse Open) then transition
