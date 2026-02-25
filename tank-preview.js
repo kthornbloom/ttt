@@ -184,6 +184,15 @@ async function loadTank(character) {
     }
   });
 
+  // Hide boost-fire on character selection (not boosting)
+  let bf = tankMesh.getObjectByName('boost-fire') || tankMesh.getObjectByName('Boost-Fire');
+  if (!bf) {
+    tankMesh.traverse((c) => {
+      if (!bf && c.name && c.name.toLowerCase().replace(/[-_]/g, '') === 'boostfire') bf = c;
+    });
+  }
+  if (bf) bf.visible = false;
+
   // Collect barrels and show primary weapon
   const weaponObjs = collectAllWeaponBarrels(tankMesh);
   const fallbackBarrel = tankMesh.getObjectByName('Barrel');

@@ -340,6 +340,7 @@ let boostRemaining = boostDuration;
 let boostRefillDelayRemaining = 0;
 let lastFrameWantedBoostButEmpty = false;
 let boostRamp = 0;  // 0–1, ramps up/down for smooth boost cutoff
+let lastFrameWasGrounded = false;
 let weaponMode = 1;
 let weaponSwitchPhase = 'idle';
 let weaponSwitchT = 0;
@@ -1023,6 +1024,7 @@ async function init(levelId = 'level-01', tankId = 'tank-01') {
   boostRemaining = boostDuration;
   boostRefillDelayRemaining = 0;
   boostRamp = 0;
+  lastFrameWasGrounded = false;
   weaponMode = 1;
   weaponSwitchPhase = 'idle';
   weaponSwitchT = 0;
@@ -2162,8 +2164,12 @@ function animate() {
     // When airborne: preserve momentum, no drive/turn input (wheels not on ground)
     let vx, vz;
     if (hit) {
-      vx = forward.x * effectiveSpeed + playerKnockbackVel.x;
-      vz = forward.z * effectiveSpeed + playerKnockbackVel.z;
+      // Preserve landing momentum only on first frame of touchdown (air->ground); avoids feedback loop
+      const justLanded = !lastFrameWasGrounded;
+      const forwardVel = linVel.x * forward.x + linVel.z * forward.z;
+      const useSpeed = (justLanded && Math.abs(forwardVel) > Math.abs(effectiveSpeed)) ? forwardVel : effectiveSpeed;
+      vx = forward.x * useSpeed + playerKnockbackVel.x;
+      vz = forward.z * useSpeed + playerKnockbackVel.z;
     } else {
       const forwardVel = linVel.x * forward.x + linVel.z * forward.z;
       // Carryover: when leaving a ledge while holding forward, ensure we keep at least currentSpeed
@@ -2180,19 +2186,32 @@ function animate() {
       }
     }
     // Rocket boost: ramp up when pressed, ramp down when released (smooth cutoff)
+    // Boost direction uses body rotation so angled-back gives vertical lift
     boostRamp += (isBoosting ? 1 : -1) * (isBoosting ? boostRampUpSpeed : boostRampDownSpeed) * dt;
     boostRamp = Math.max(0, Math.min(1, boostRamp));
+    let vy = linVel.y + playerKnockbackVel.y;
     if (boostRamp > 0.01) {
-      const force = hit ? boostForceGround : boostForceAir;
-      vx += forward.x * force * boostRamp * dt;
-      vz += forward.z * force * boostRamp * dt;
+      const bodyPitchTotal = bodyPitch + bodyAimPitch;
+      const boostDir = new THREE.Vector3(0, 0, -1)
+        .applyAxisAngle(new THREE.Vector3(1, 0, 0), bodyPitchTotal)
+        .applyAxisAngle(new THREE.Vector3(0, 0, 1), bodyRoll)
+        .applyQuaternion(qCurrent)
+        .normalize();
+      // Ground + horizontal: full ground force; ground + vertical: reduced for boost jump; air: air force
+      const force = hit
+        ? (boostDir.y < 0.35 ? boostForceGround : boostForceGround * 0.35)
+        : boostForceAir;
+      const boostAmount = force * boostRamp * dt;
+      vx += boostDir.x * boostAmount;
+      vz += boostDir.z * boostAmount;
+      vy += boostDir.y * boostAmount;
     }
     const tankCol = tankRigidBody.numColliders() > 0 ? tankRigidBody.collider(0) : null;
     if (tankCol?.setFriction) tankCol.setFriction(boostRamp > 0.01 ? 0 : 1.2);
     tankRigidBody.setLinvel(
       {
         x: vx,
-        y: linVel.y + playerKnockbackVel.y,
+        y: vy,
         z: vz
       },
       true
@@ -2203,6 +2222,7 @@ function animate() {
       true
     );
   }
+  lastFrameWasGrounded = !!hit;
 
   if (tankRigidBody) {
   if (hit) {
@@ -3584,7 +3604,7 @@ function animate() {
       const cd = w.type === 'cannon' ? cannonCooldown : weapon2Cooldown;
       return `Ammo: ${cannonAmmo}${cd > 0 ? ` (${cd.toFixed(1)}s)` : ''}`;
     }
-    if (w.type === 'minigun') return `Ammo: ${minigunAmmo}`;
+    if (w.type === 'minigun') return `Ammo: ${Math.floor(minigunAmmo)}`;
     if (isHeatBeamWeapon(w)) return `Heat: ${heatPct}%`;
     if (w.type === 'emp') return `Cooldown: ${weapon2Cooldown > 0 ? weapon2Cooldown.toFixed(1) + 's' : 'Ready'}`;
     return '—';
