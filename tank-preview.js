@@ -38,7 +38,7 @@ function getBarrelZBackExtent(barrel) {
 }
 
 function isTopMountedWeapon(type) {
-  return type === 'emp' || type === 'mortar';
+  return type === 'emp' || type === 'mortar' || type === 'rockets';
 }
 
 function getTopMountedExtendedY(barrel) {

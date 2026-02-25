@@ -6,7 +6,7 @@
             "description": "Balanced tank with cannon & laser",
             "color": "#4a90d9",
             "health": 100,
-            "speed": 15,
+            "speed": 13,
             "acceleration": 1,
             "isUnlocked": true,
             "glbPath": "/assets/characters/tank-01.glb",
@@ -58,6 +58,16 @@
                     "ammoMax": 7,
                     "speed": 20,
                     "knockbackImpulse": 35
+                },{
+                    "id": "mine",
+                    "name": "Mine",
+                    "type": "mine",
+                    "damage": 50,
+                    "cooldown": 2.5,
+                    "ammoMax": 7,
+                    "knockbackImpulse": 35,
+                    "splashRadius": 8,
+                    "splashDamageFalloff": 0.3
                 }
             ]
         },
@@ -67,7 +77,7 @@
             "description": "Fast tank with improved boost but smaller minigun weapons",
             "color": "#8b4513",
             "health": 70,
-            "speed": 20,
+            "speed": 15,
             "acceleration": 1.5,
             "isUnlocked": true,
             "glbPath": "/assets/characters/tank-03.glb",
@@ -84,6 +94,18 @@
                     "ammoMax": 750,
                     "ammoDrainRate": 50,
                     "range": 22
+                },{
+                    "id": "rockets",
+                    "name": "Rockets",
+                    "type": "rockets",
+                    "damage": 25,
+                    "cooldown": 5,
+                    "ammoMax": 6,
+                    "speed": 22,
+                    "knockbackImpulse": 30,
+                    "launchAngle": 75,
+                    "splashRadius": 8,
+                    "splashDamageFalloff": 0.3
                 }
             ]
         },
@@ -93,7 +115,7 @@
             "description": "Balanced tank with a disabler EMP weapon and a cannon",
             "color": "#c41e3a",
             "health": 80,
-            "speed": 14,
+            "speed": 13,
             "acceleration": 0.8,
             "isUnlocked": true,
             "glbPath": "/assets/characters/tank-04.glb",
